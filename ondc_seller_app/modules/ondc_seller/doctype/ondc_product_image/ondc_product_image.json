@@ -1,0 +1,39 @@
+{
+ "actions": [],
+ "creation": "2025-06-13 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "image_url",
+  "size_type"
+ ],
+ "fields": [
+  {
+   "fieldname": "image_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Image URL",
+   "reqd": 1
+  },
+  {
+   "fieldname": "size_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Size Type",
+   "options": "small\nmedium\nlarge",
+   "default": "medium"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-06-13 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ONDC Seller",
+ "name": "ONDC Product Image",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}
