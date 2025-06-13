@@ -1,0 +1,274 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:ondc_order_id",
+ "creation": "2025-06-13 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "ondc_order_id",
+  "sales_order",
+  "transaction_id",
+  "message_id",
+  "column_break_1",
+  "bap_id",
+  "bap_uri",
+  "order_status",
+  "created_at",
+  "customer_section",
+  "customer_name",
+  "customer_email",
+  "customer_phone",
+  "billing_section",
+  "billing_name",
+  "billing_building",
+  "billing_locality",
+  "column_break_2",
+  "billing_city",
+  "billing_state",
+  "billing_area_code",
+  "shipping_section",
+  "fulfillment_id",
+  "fulfillment_type",
+  "column_break_3",
+  "shipping_gps",
+  "shipping_address",
+  "items_section",
+  "items",
+  "payment_section",
+  "payment_type",
+  "payment_status",
+  "column_break_4",
+  "total_amount",
+  "updated_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "ondc_order_id",
+   "fieldtype": "Data",
+   "label": "ONDC Order ID",
+   "unique": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Sales Order",
+   "options": "Sales Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "transaction_id",
+   "fieldtype": "Data",
+   "label": "Transaction ID"
+  },
+  {
+   "fieldname": "message_id",
+   "fieldtype": "Data",
+   "label": "Message ID"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "bap_id",
+   "fieldtype": "Data",
+   "label": "BAP ID"
+  },
+  {
+   "fieldname": "bap_uri",
+   "fieldtype": "Data",
+   "label": "BAP URI"
+  },
+  {
+   "fieldname": "order_status",
+   "fieldtype": "Select",
+   "label": "Order Status",
+   "options": "Pending\nAccepted\nIn-progress\nCompleted\nCancelled",
+   "default": "Pending"
+  },
+  {
+   "fieldname": "created_at",
+   "fieldtype": "Datetime",
+   "label": "Created At",
+   "default": "__timestamp"
+  },
+  {
+   "fieldname": "customer_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Details"
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Customer Name"
+  },
+  {
+   "fieldname": "customer_email",
+   "fieldtype": "Data",
+   "label": "Customer Email"
+  },
+  {
+   "fieldname": "customer_phone",
+   "fieldtype": "Data",
+   "label": "Customer Phone"
+  },
+  {
+   "fieldname": "billing_section",
+   "fieldtype": "Section Break",
+   "label": "Billing Address"
+  },
+  {
+   "fieldname": "billing_name",
+   "fieldtype": "Data",
+   "label": "Name"
+  },
+  {
+   "fieldname": "billing_building",
+   "fieldtype": "Data",
+   "label": "Building"
+  },
+  {
+   "fieldname": "billing_locality",
+   "fieldtype": "Data",
+   "label": "Locality"
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "billing_city",
+   "fieldtype": "Data",
+   "label": "City"
+  },
+  {
+   "fieldname": "billing_state",
+   "fieldtype": "Data",
+   "label": "State"
+  },
+  {
+   "fieldname": "billing_area_code",
+   "fieldtype": "Data",
+   "label": "Area Code"
+  },
+  {
+   "fieldname": "shipping_section",
+   "fieldtype": "Section Break",
+   "label": "Shipping Details"
+  },
+  {
+   "fieldname": "fulfillment_id",
+   "fieldtype": "Data",
+   "label": "Fulfillment ID"
+  },
+  {
+   "fieldname": "fulfillment_type",
+   "fieldtype": "Select",
+   "label": "Fulfillment Type",
+   "options": "Delivery\nPickup",
+   "default": "Delivery"
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "shipping_gps",
+   "fieldtype": "Data",
+   "label": "GPS Coordinates"
+  },
+  {
+   "fieldname": "shipping_address",
+   "fieldtype": "Small Text",
+   "label": "Shipping Address"
+  },
+  {
+   "fieldname": "items_section",
+   "fieldtype": "Section Break",
+   "label": "Order Items"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "ONDC Order Item"
+  },
+  {
+   "fieldname": "payment_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Details"
+  },
+  {
+   "fieldname": "payment_type",
+   "fieldtype": "Select",
+   "label": "Payment Type",
+   "options": "Prepaid\nCOD\nCredit",
+   "default": "Prepaid"
+  },
+  {
+   "fieldname": "payment_status",
+   "fieldtype": "Select",
+   "label": "Payment Status",
+   "options": "Pending\nPaid\nRefunded",
+   "default": "Pending"
+  },
+  {
+   "fieldname": "column_break_4",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Total Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "updated_at",
+   "fieldtype": "Datetime",
+   "label": "Updated At"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [
+  {
+   "link_doctype": "Sales Order",
+   "link_fieldname": "po_no"
+  }
+ ],
+ "modified": "2025-06-13 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ONDC Seller",
+ "name": "ONDC Order",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
