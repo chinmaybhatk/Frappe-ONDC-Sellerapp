@@ -1,0 +1,22 @@
+[project]
+name = "ondc_seller_app"
+authors = [
+    { name = "Your Company", email = "info@example.com" }
+]
+description = "Frappe app for ONDC sellers to manage products, orders, and integrations"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "frappe~=15.0.0",
+    "cryptography>=41.0.0",
+    "pynacl>=1.5.0",
+    "requests>=2.31.0"
+]
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.bench.dev-dependencies]
+pre-commit = "~3.3.2"

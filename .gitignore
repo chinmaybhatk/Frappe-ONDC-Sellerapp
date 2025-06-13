@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+*.egg-info/
+*.swp
+tags
+ondc_seller_app/docs/current
+node_modules/
+.DS_Store
