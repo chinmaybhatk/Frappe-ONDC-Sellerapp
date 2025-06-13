@@ -1,0 +1,18 @@
+include MANIFEST.in
+include requirements.txt
+include *.json
+include *.md
+include *.py
+include *.txt
+recursive-include ondc_seller_app *.css
+recursive-include ondc_seller_app *.csv
+recursive-include ondc_seller_app *.html
+recursive-include ondc_seller_app *.ico
+recursive-include ondc_seller_app *.js
+recursive-include ondc_seller_app *.json
+recursive-include ondc_seller_app *.md
+recursive-include ondc_seller_app *.png
+recursive-include ondc_seller_app *.py
+recursive-include ondc_seller_app *.svg
+recursive-include ondc_seller_app *.txt
+recursive-exclude ondc_seller_app *.pyc
