@@ -7,6 +7,9 @@ app_color = "blue"
 app_email = "info@example.com"
 app_license = "MIT"
 
+# After app install
+after_install = "ondc_seller_app.after_install.after_install"
+
 # Document Events
 doc_events = {
     "Item": {
@@ -28,17 +31,6 @@ scheduler_events = {
         "ondc_seller_app.tasks.sync_orders"
     ]
 }
-
-# Fixtures - commented out to allow initial installation
-# After installation, uncomment this to enable fixture exports
-# fixtures = [
-#     {
-#         "doctype": "Custom Field",
-#         "filters": [
-#             ["dt", "in", ["Item", "Sales Order", "Customer", "Customer Group"]]
-#         ]
-#     }
-# ]
 
 # Website routes
 website_route_rules = [
