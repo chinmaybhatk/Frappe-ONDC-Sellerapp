@@ -29,14 +29,16 @@ scheduler_events = {
     ]
 }
 
-fixtures = [
-    {
-        "doctype": "Custom Field",
-        "filters": [
-            ["dt", "in", ["Item", "Sales Order", "Customer"]]
-        ]
-    }
-]
+# Fixtures - commented out to allow initial installation
+# After installation, uncomment this to enable fixture exports
+# fixtures = [
+#     {
+#         "doctype": "Custom Field",
+#         "filters": [
+#             ["dt", "in", ["Item", "Sales Order", "Customer", "Customer Group"]]
+#         ]
+#     }
+# ]
 
 # Website routes
 website_route_rules = [
