@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import now_datetime, add_hours
+from frappe.utils import now_datetime, add_to_date
 from datetime import datetime, timedelta
 
 def sync_inventory():
@@ -42,7 +42,7 @@ def sync_orders():
             'ONDC Order',
             filters={
                 'order_status': ['in', ['Accepted', 'In-progress']],
-                'updated_at': ['<', add_hours(now_datetime(), -1)]
+                'updated_at': ['<', add_to_date(now_datetime(), hours=-1)]
             },
             fields=['name', 'ondc_order_id', 'order_status']
         )
