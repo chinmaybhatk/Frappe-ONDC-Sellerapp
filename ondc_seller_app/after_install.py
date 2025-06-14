@@ -6,6 +6,9 @@ def after_install():
     """Run after app installation"""
     print("Running ONDC Seller App post-installation setup...")
     
+    # First, remove any existing fixture files that might cause conflicts
+    cleanup_fixtures()
+    
     # Create custom fields manually
     create_custom_fields()
     
@@ -30,6 +33,19 @@ def after_install():
     
     frappe.db.commit()
     print("ONDC Seller App installation completed successfully!")
+
+def cleanup_fixtures():
+    """Remove any fixture files that might cause installation issues"""
+    try:
+        app_path = frappe.get_app_path('ondc_seller_app')
+        fixtures_path = os.path.join(app_path, 'fixtures')
+        custom_fields_path = os.path.join(fixtures_path, 'custom_fields.json')
+        
+        if os.path.exists(custom_fields_path):
+            os.remove(custom_fields_path)
+            print(f"Removed fixture file: {custom_fields_path}")
+    except Exception as e:
+        print(f"Could not remove fixture file: {str(e)}")
 
 def create_custom_fields():
     """Create custom fields for ONDC app"""
