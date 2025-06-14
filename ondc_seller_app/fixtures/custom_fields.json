@@ -1,6 +1,7 @@
 [
   {
     "doctype": "Custom Field",
+    "name": "Item-sync_to_ondc",
     "dt": "Item",
     "fieldname": "sync_to_ondc",
     "fieldtype": "Check",
@@ -10,6 +11,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Item-ondc_section",
     "dt": "Item",
     "fieldname": "ondc_section",
     "fieldtype": "Section Break",
@@ -19,6 +21,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Item-ondc_product_id",
     "dt": "Item",
     "fieldname": "ondc_product_id",
     "fieldtype": "Data",
@@ -28,6 +31,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Item-country_of_origin",
     "dt": "Item",
     "fieldname": "country_of_origin",
     "fieldtype": "Link",
@@ -38,6 +42,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Sales Order-ondc_order_id",
     "dt": "Sales Order",
     "fieldname": "ondc_order_id",
     "fieldtype": "Data",
@@ -47,6 +52,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Customer-is_ondc_customer",
     "dt": "Customer",
     "fieldname": "is_ondc_customer",
     "fieldtype": "Check",
@@ -56,6 +62,7 @@
   },
   {
     "doctype": "Custom Field",
+    "name": "Customer Group-is_ondc_group",
     "dt": "Customer Group",
     "fieldname": "is_ondc_group",
     "fieldtype": "Check",
