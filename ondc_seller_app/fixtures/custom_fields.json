@@ -1,0 +1,73 @@
+[
+    {
+        "doctype": "Custom Field",
+        "name": "Item-sync_to_ondc",
+        "dt": "Item",
+        "fieldname": "sync_to_ondc",
+        "fieldtype": "Check",
+        "label": "Sync to ONDC",
+        "insert_after": "is_stock_item",
+        "description": "Enable to sync this item to ONDC network"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-ondc_section",
+        "dt": "Item",
+        "fieldname": "ondc_section",
+        "fieldtype": "Section Break",
+        "label": "ONDC Details",
+        "insert_after": "website_section",
+        "collapsible": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-ondc_product_id",
+        "dt": "Item",
+        "fieldname": "ondc_product_id",
+        "fieldtype": "Data",
+        "label": "ONDC Product ID",
+        "insert_after": "ondc_section",
+        "read_only": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-country_of_origin",
+        "dt": "Item",
+        "fieldname": "country_of_origin",
+        "fieldtype": "Link",
+        "label": "Country of Origin",
+        "options": "Country",
+        "insert_after": "ondc_product_id",
+        "default": "India"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Sales Order-ondc_order_id",
+        "dt": "Sales Order",
+        "fieldname": "ondc_order_id",
+        "fieldtype": "Data",
+        "label": "ONDC Order ID",
+        "insert_after": "po_no",
+        "read_only": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Customer-is_ondc_customer",
+        "dt": "Customer",
+        "fieldname": "is_ondc_customer",
+        "fieldtype": "Check",
+        "label": "Is ONDC Customer",
+        "insert_after": "customer_type",
+        "read_only": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Customer Group-is_ondc_group",
+        "dt": "Customer Group",
+        "fieldname": "is_ondc_group",
+        "fieldtype": "Check",
+        "label": "Is ONDC Group",
+        "insert_after": "is_group",
+        "description": "Check if this is the default group for ONDC customers"
+    }
+]
