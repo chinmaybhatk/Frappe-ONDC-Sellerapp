@@ -10,6 +10,16 @@ app_license = "MIT"
 # After app install
 after_install = "ondc_seller_app.after_install.after_install"
 
+# Fixtures
+fixtures = [
+    {
+        "doctype": "Custom Field",
+        "filters": [
+            ["dt", "in", ["Item", "Sales Order", "Customer", "Customer Group"]]
+        ]
+    }
+]
+
 # Document Events
 doc_events = {
     "Item": {
