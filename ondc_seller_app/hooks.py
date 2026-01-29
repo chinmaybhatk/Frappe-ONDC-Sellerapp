@@ -38,11 +38,13 @@ scheduler_events = {
         "ondc_seller_app.tasks.sync_inventory"
     ],
     "daily": [
-        "ondc_seller_app.tasks.sync_orders"
+        "ondc_seller_app.tasks.sync_orders",
+        "ondc_seller_app.tasks.cleanup_webhook_logs"
     ]
 }
 
-# Website routes
+# Website routes - includes both webhook handler and /on_subscribe endpoint
 website_route_rules = [
-    {"from_route": "/ondc/webhook/<path:api>", "to_route": "ondc_seller_app.api.webhook.handle_webhook"}
+    {"from_route": "/ondc/webhook/<path:api>", "to_route": "ondc_seller_app.api.webhook.handle_webhook"},
+    {"from_route": "/on_subscribe", "to_route": "ondc_seller_app.api.ondc_client.handle_on_subscribe"}
 ]

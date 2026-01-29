@@ -18,6 +18,44 @@
   "gst_no",
   "pan_no",
   "legal_entity_name",
+  "store_section",
+  "store_name",
+  "store_short_desc",
+  "store_long_desc",
+  "store_logo",
+  "column_break_store",
+  "store_gps",
+  "store_locality",
+  "store_city_name",
+  "store_state",
+  "store_area_code",
+  "operations_section",
+  "default_warehouse",
+  "operating_hours_start",
+  "operating_hours_end",
+  "column_break_ops",
+  "default_time_to_ship",
+  "default_return_window",
+  "serviceable_radius",
+  "payment_section",
+  "support_prepaid",
+  "support_cod",
+  "buyer_finder_fee",
+  "column_break_payment",
+  "default_delivery_charge",
+  "default_packing_charge",
+  "default_tax_rate",
+  "fulfillment_section",
+  "support_delivery",
+  "support_pickup",
+  "column_break_fulfillment",
+  "support_section",
+  "consumer_care_phone",
+  "consumer_care_email",
+  "sync_section",
+  "auto_sync_products",
+  "auto_sync_inventory",
+  "auto_sync_orders",
   "section_break_1",
   "signing_public_key",
   "signing_private_key",
@@ -58,7 +96,7 @@
    "fieldname": "domain",
    "fieldtype": "Select",
    "label": "Domain",
-   "options": "ONDC:RET10\nONDC:RET11\nONDC:RET12\nONDC:RET13\nONDC:RET14\nONDC:RET15",
+   "options": "ONDC:RET10\nONDC:RET11\nONDC:RET12\nONDC:RET13\nONDC:RET14\nONDC:RET15\nONDC:RET16\nONDC:RET18",
    "reqd": 1
   },
   {
@@ -98,6 +136,205 @@
    "label": "Legal Entity Name"
   },
   {
+   "fieldname": "store_section",
+   "fieldtype": "Section Break",
+   "label": "Store Details"
+  },
+  {
+   "fieldname": "store_name",
+   "fieldtype": "Data",
+   "label": "Store Name"
+  },
+  {
+   "fieldname": "store_short_desc",
+   "fieldtype": "Small Text",
+   "label": "Store Short Description"
+  },
+  {
+   "fieldname": "store_long_desc",
+   "fieldtype": "Text",
+   "label": "Store Long Description"
+  },
+  {
+   "fieldname": "store_logo",
+   "fieldtype": "Data",
+   "label": "Store Logo URL"
+  },
+  {
+   "fieldname": "column_break_store",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "store_gps",
+   "fieldtype": "Data",
+   "label": "Store GPS Coordinates",
+   "description": "Format: lat,lng e.g. 12.9716,77.5946"
+  },
+  {
+   "fieldname": "store_locality",
+   "fieldtype": "Data",
+   "label": "Store Locality"
+  },
+  {
+   "fieldname": "store_city_name",
+   "fieldtype": "Data",
+   "label": "Store City Name"
+  },
+  {
+   "fieldname": "store_state",
+   "fieldtype": "Data",
+   "label": "Store State"
+  },
+  {
+   "fieldname": "store_area_code",
+   "fieldtype": "Data",
+   "label": "Store Area Code / Pincode"
+  },
+  {
+   "fieldname": "operations_section",
+   "fieldtype": "Section Break",
+   "label": "Operations"
+  },
+  {
+   "fieldname": "default_warehouse",
+   "fieldtype": "Link",
+   "label": "Default Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "operating_hours_start",
+   "fieldtype": "Data",
+   "label": "Operating Hours Start",
+   "default": "09:00"
+  },
+  {
+   "fieldname": "operating_hours_end",
+   "fieldtype": "Data",
+   "label": "Operating Hours End",
+   "default": "21:00"
+  },
+  {
+   "fieldname": "column_break_ops",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_time_to_ship",
+   "fieldtype": "Data",
+   "label": "Default Time to Ship (ISO 8601)",
+   "default": "PT60M"
+  },
+  {
+   "fieldname": "default_return_window",
+   "fieldtype": "Data",
+   "label": "Default Return Window (ISO 8601)",
+   "default": "PT72H"
+  },
+  {
+   "fieldname": "serviceable_radius",
+   "fieldtype": "Data",
+   "label": "Serviceable Radius (km)",
+   "default": "10"
+  },
+  {
+   "fieldname": "payment_section",
+   "fieldtype": "Section Break",
+   "label": "Payment & Charges"
+  },
+  {
+   "fieldname": "support_prepaid",
+   "fieldtype": "Check",
+   "label": "Support Prepaid",
+   "default": "1"
+  },
+  {
+   "fieldname": "support_cod",
+   "fieldtype": "Check",
+   "label": "Support Cash on Delivery"
+  },
+  {
+   "fieldname": "buyer_finder_fee",
+   "fieldtype": "Data",
+   "label": "Buyer Finder Fee %",
+   "default": "3"
+  },
+  {
+   "fieldname": "column_break_payment",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_delivery_charge",
+   "fieldtype": "Currency",
+   "label": "Default Delivery Charge",
+   "default": "0"
+  },
+  {
+   "fieldname": "default_packing_charge",
+   "fieldtype": "Currency",
+   "label": "Default Packing Charge",
+   "default": "0"
+  },
+  {
+   "fieldname": "default_tax_rate",
+   "fieldtype": "Float",
+   "label": "Default Tax Rate %",
+   "default": "0"
+  },
+  {
+   "fieldname": "fulfillment_section",
+   "fieldtype": "Section Break",
+   "label": "Fulfillment"
+  },
+  {
+   "fieldname": "support_delivery",
+   "fieldtype": "Check",
+   "label": "Support Delivery",
+   "default": "1"
+  },
+  {
+   "fieldname": "support_pickup",
+   "fieldtype": "Check",
+   "label": "Support Self-Pickup"
+  },
+  {
+   "fieldname": "column_break_fulfillment",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "support_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Support"
+  },
+  {
+   "fieldname": "consumer_care_phone",
+   "fieldtype": "Data",
+   "label": "Consumer Care Phone"
+  },
+  {
+   "fieldname": "consumer_care_email",
+   "fieldtype": "Data",
+   "label": "Consumer Care Email"
+  },
+  {
+   "fieldname": "sync_section",
+   "fieldtype": "Section Break",
+   "label": "Sync Settings"
+  },
+  {
+   "fieldname": "auto_sync_products",
+   "fieldtype": "Check",
+   "label": "Auto Sync Products"
+  },
+  {
+   "fieldname": "auto_sync_inventory",
+   "fieldtype": "Check",
+   "label": "Auto Sync Inventory"
+  },
+  {
+   "fieldname": "auto_sync_orders",
+   "fieldtype": "Check",
+   "label": "Auto Sync Orders"
+  },
+  {
    "fieldname": "section_break_1",
    "fieldtype": "Section Break",
    "label": "Security Keys"
@@ -134,7 +371,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2025-06-13 12:00:00.000000",
+ "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ONDC Seller",
  "name": "ONDC Settings",

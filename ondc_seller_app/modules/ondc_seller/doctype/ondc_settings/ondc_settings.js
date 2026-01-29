@@ -10,7 +10,7 @@ frappe.ui.form.on('ONDC Settings', {
                     }
                 });
             });
-            
+
             frm.add_custom_button(__('Test Connection'), function() {
                 frappe.call({
                     method: 'ondc_seller_app.api.ondc_client.test_connection',
@@ -26,11 +26,25 @@ frappe.ui.form.on('ONDC Settings', {
                     }
                 });
             });
+
+            frm.add_custom_button(__('Generate Key Pairs'), function() {
+                frappe.confirm(
+                    __('This will generate new Ed25519 signing and X25519 encryption key pairs. Existing keys will be overwritten. Continue?'),
+                    function() {
+                        frappe.call({
+                            method: 'generate_keys',
+                            doc: frm.doc,
+                            callback: function(r) {
+                                frm.reload_doc();
+                            }
+                        });
+                    }
+                );
+            });
         }
     },
-    
+
     environment: function(frm) {
-        // Clear webhook URL when environment changes
         if (frm.doc.webhook_url) {
             frm.set_value('webhook_url', '');
         }

@@ -24,7 +24,7 @@
    "fieldname": "webhook_type",
    "fieldtype": "Select",
    "label": "Webhook Type",
-   "options": "on_search\non_select\non_init\non_confirm\non_status\non_track\non_cancel\non_update\non_rating\non_support",
+   "options": "search\nselect\ninit\nconfirm\nstatus\ntrack\ncancel\nupdate\nrating\nsupport\non_search\non_select\non_init\non_confirm\non_status\non_track\non_cancel\non_update\non_rating\non_support\non_subscribe",
    "in_list_view": 1,
    "in_standard_filter": 1
   },
@@ -94,7 +94,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2025-06-13 12:00:00.000000",
+ "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ONDC Seller",
  "name": "ONDC Webhook Log",

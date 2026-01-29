@@ -15,6 +15,7 @@
   "bap_id",
   "bap_uri",
   "order_status",
+  "cancellation_reason_id",
   "created_at",
   "customer_section",
   "customer_name",
@@ -31,9 +32,11 @@
   "shipping_section",
   "fulfillment_id",
   "fulfillment_type",
+  "fulfillment_state",
   "column_break_3",
   "shipping_gps",
   "shipping_address",
+  "tracking_url",
   "items_section",
   "items",
   "payment_section",
@@ -88,6 +91,12 @@
    "label": "Order Status",
    "options": "Pending\nAccepted\nIn-progress\nCompleted\nCancelled",
    "default": "Pending"
+  },
+  {
+   "fieldname": "cancellation_reason_id",
+   "fieldtype": "Data",
+   "label": "Cancellation Reason ID",
+   "description": "ONDC cancellation reason code"
   },
   {
    "fieldname": "created_at",
@@ -172,6 +181,14 @@
    "default": "Delivery"
   },
   {
+   "fieldname": "fulfillment_state",
+   "fieldtype": "Select",
+   "label": "Fulfillment State",
+   "options": "Pending\nPacked\nAgent-assigned\nAt-pickup\nOrder-picked-up\nOut-for-delivery\nOrder-delivered\nDelivery-failed\nCancelled\nRTO-Initiated\nRTO-Delivered\nRTO-Disposed",
+   "default": "Pending",
+   "description": "Granular ONDC fulfillment states"
+  },
+  {
    "fieldname": "column_break_3",
    "fieldtype": "Column Break"
   },
@@ -184,6 +201,12 @@
    "fieldname": "shipping_address",
    "fieldtype": "Small Text",
    "label": "Shipping Address"
+  },
+  {
+   "fieldname": "tracking_url",
+   "fieldtype": "Data",
+   "label": "Tracking URL",
+   "description": "Tracking URL for shipment"
   },
   {
    "fieldname": "items_section",
@@ -238,7 +261,7 @@
    "link_fieldname": "po_no"
   }
  ],
- "modified": "2025-06-13 12:00:00.000000",
+ "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ONDC Seller",
  "name": "ONDC Order",

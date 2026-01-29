@@ -31,7 +31,26 @@
   "attributes_section",
   "brand",
   "manufacturer",
-  "country_of_origin"
+  "country_of_origin",
+  "ondc_compliance_section",
+  "is_returnable",
+  "is_cancellable",
+  "seller_pickup_return",
+  "available_on_cod",
+  "column_break_compliance",
+  "time_to_ship",
+  "return_window",
+  "consumer_care_contact",
+  "statutory_section",
+  "manufacturer_name",
+  "manufacturer_address",
+  "column_break_statutory",
+  "common_generic_name",
+  "net_quantity_or_measure",
+  "month_year_of_manufacture",
+  "linking_section",
+  "location_id",
+  "fulfillment_id"
  ],
  "fields": [
   {
@@ -170,11 +189,112 @@
    "fieldtype": "Data",
    "label": "Country of Origin",
    "default": "IND"
+  },
+  {
+   "fieldname": "ondc_compliance_section",
+   "fieldtype": "Section Break",
+   "label": "ONDC Compliance"
+  },
+  {
+   "fieldname": "is_returnable",
+   "fieldtype": "Check",
+   "label": "Is Returnable",
+   "default": "1"
+  },
+  {
+   "fieldname": "is_cancellable",
+   "fieldtype": "Check",
+   "label": "Is Cancellable",
+   "default": "1"
+  },
+  {
+   "fieldname": "seller_pickup_return",
+   "fieldtype": "Check",
+   "label": "Seller Pickup Return",
+   "default": "1"
+  },
+  {
+   "fieldname": "available_on_cod",
+   "fieldtype": "Check",
+   "label": "Available on COD",
+   "default": "1"
+  },
+  {
+   "fieldname": "column_break_compliance",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "time_to_ship",
+   "fieldtype": "Data",
+   "label": "Time to Ship (ISO 8601)",
+   "default": "P1D"
+  },
+  {
+   "fieldname": "return_window",
+   "fieldtype": "Data",
+   "label": "Return Window (ISO 8601)",
+   "default": "PT72H"
+  },
+  {
+   "fieldname": "consumer_care_contact",
+   "fieldtype": "Data",
+   "label": "Consumer Care Contact",
+   "description": "Format: Name,email,phone"
+  },
+  {
+   "fieldname": "statutory_section",
+   "fieldtype": "Section Break",
+   "label": "Statutory Requirements (Packaged Commodities)"
+  },
+  {
+   "fieldname": "manufacturer_name",
+   "fieldtype": "Data",
+   "label": "Manufacturer/Packer Name"
+  },
+  {
+   "fieldname": "manufacturer_address",
+   "fieldtype": "Small Text",
+   "label": "Manufacturer/Packer Address"
+  },
+  {
+   "fieldname": "column_break_statutory",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "common_generic_name",
+   "fieldtype": "Data",
+   "label": "Common/Generic Name of Commodity"
+  },
+  {
+   "fieldname": "net_quantity_or_measure",
+   "fieldtype": "Data",
+   "label": "Net Quantity/Measure"
+  },
+  {
+   "fieldname": "month_year_of_manufacture",
+   "fieldtype": "Data",
+   "label": "Month/Year of Manufacture/Packing/Import"
+  },
+  {
+   "fieldname": "linking_section",
+   "fieldtype": "Section Break",
+   "label": "ONDC Linking"
+  },
+  {
+   "fieldname": "location_id",
+   "fieldtype": "Data",
+   "label": "Location ID"
+  },
+  {
+   "fieldname": "fulfillment_id",
+   "fieldtype": "Data",
+   "label": "Fulfillment ID",
+   "default": "F1"
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2025-06-13 12:00:00.000000",
+ "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ONDC Seller",
  "name": "ONDC Product",
