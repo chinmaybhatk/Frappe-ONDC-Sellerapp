@@ -1,0 +1,285 @@
+{
+  "actions": [],
+  "autoname": "format:ONDC-LOG-{#####}",
+  "creation": "2024-01-15 10:00:00.000000",
+  "doctype": "DocType",
+  "engine": "InnoDB",
+  "field_order": [
+    "log_type",
+    "action",
+    "status",
+    "timestamp",
+    "column_break_1",
+    "transaction_id",
+    "message_id",
+    "order_id",
+    "section_break_parties",
+    "bap_id",
+    "bpp_id",
+    "column_break_parties",
+    "domain",
+    "ip_address",
+    "section_break_igm",
+    "issue_id",
+    "ticket_id",
+    "column_break_igm",
+    "issue_category",
+    "issue_status",
+    "section_break_rsp",
+    "settlement_id",
+    "amount",
+    "column_break_rsp",
+    "recon_status",
+    "payment_ref_no",
+    "section_break_error",
+    "error_code",
+    "error_message",
+    "section_break_lifecycle",
+    "from_state",
+    "to_state",
+    "triggered_by",
+    "section_break_performance",
+    "latency_ms",
+    "section_break_data",
+    "request_data",
+    "response_data"
+  ],
+  "fields": [
+    {
+      "fieldname": "log_type",
+      "fieldtype": "Select",
+      "in_list_view": 1,
+      "in_standard_filter": 1,
+      "label": "Log Type",
+      "options": "API\nIGM\nRSP\nERROR\nCATALOG\nORDER",
+      "reqd": 1
+    },
+    {
+      "fieldname": "action",
+      "fieldtype": "Data",
+      "in_list_view": 1,
+      "in_standard_filter": 1,
+      "label": "Action"
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "in_list_view": 1,
+      "in_standard_filter": 1,
+      "label": "Status",
+      "options": "Success\nFailed\nPending\nResolved"
+    },
+    {
+      "fieldname": "timestamp",
+      "fieldtype": "Datetime",
+      "in_list_view": 1,
+      "label": "Timestamp"
+    },
+    {
+      "fieldname": "column_break_1",
+      "fieldtype": "Column Break"
+    },
+    {
+      "fieldname": "transaction_id",
+      "fieldtype": "Data",
+      "in_standard_filter": 1,
+      "label": "Transaction ID"
+    },
+    {
+      "fieldname": "message_id",
+      "fieldtype": "Data",
+      "label": "Message ID"
+    },
+    {
+      "fieldname": "order_id",
+      "fieldtype": "Data",
+      "in_standard_filter": 1,
+      "label": "Order ID"
+    },
+    {
+      "fieldname": "section_break_parties",
+      "fieldtype": "Section Break",
+      "label": "Network Parties"
+    },
+    {
+      "fieldname": "bap_id",
+      "fieldtype": "Data",
+      "in_standard_filter": 1,
+      "label": "BAP ID"
+    },
+    {
+      "fieldname": "bpp_id",
+      "fieldtype": "Data",
+      "label": "BPP ID"
+    },
+    {
+      "fieldname": "column_break_parties",
+      "fieldtype": "Column Break"
+    },
+    {
+      "fieldname": "domain",
+      "fieldtype": "Data",
+      "label": "Domain"
+    },
+    {
+      "fieldname": "ip_address",
+      "fieldtype": "Data",
+      "label": "IP Address"
+    },
+    {
+      "fieldname": "section_break_igm",
+      "fieldtype": "Section Break",
+      "label": "IGM Details",
+      "depends_on": "eval:doc.log_type=='IGM'"
+    },
+    {
+      "fieldname": "issue_id",
+      "fieldtype": "Data",
+      "label": "Issue ID"
+    },
+    {
+      "fieldname": "ticket_id",
+      "fieldtype": "Link",
+      "label": "Helpdesk Ticket",
+      "options": "HD Ticket"
+    },
+    {
+      "fieldname": "column_break_igm",
+      "fieldtype": "Column Break"
+    },
+    {
+      "fieldname": "issue_category",
+      "fieldtype": "Data",
+      "label": "Issue Category"
+    },
+    {
+      "fieldname": "issue_status",
+      "fieldtype": "Data",
+      "label": "Issue Status"
+    },
+    {
+      "fieldname": "section_break_rsp",
+      "fieldtype": "Section Break",
+      "label": "RSP Details",
+      "depends_on": "eval:doc.log_type=='RSP'"
+    },
+    {
+      "fieldname": "settlement_id",
+      "fieldtype": "Data",
+      "label": "Settlement ID"
+    },
+    {
+      "fieldname": "amount",
+      "fieldtype": "Currency",
+      "label": "Amount"
+    },
+    {
+      "fieldname": "column_break_rsp",
+      "fieldtype": "Column Break"
+    },
+    {
+      "fieldname": "recon_status",
+      "fieldtype": "Data",
+      "label": "Reconciliation Status"
+    },
+    {
+      "fieldname": "payment_ref_no",
+      "fieldtype": "Data",
+      "label": "Payment Reference"
+    },
+    {
+      "fieldname": "section_break_error",
+      "fieldtype": "Section Break",
+      "label": "Error Details",
+      "depends_on": "eval:doc.log_type=='ERROR' || doc.status=='Failed'"
+    },
+    {
+      "fieldname": "error_code",
+      "fieldtype": "Data",
+      "label": "Error Code"
+    },
+    {
+      "fieldname": "error_message",
+      "fieldtype": "Small Text",
+      "label": "Error Message"
+    },
+    {
+      "fieldname": "section_break_lifecycle",
+      "fieldtype": "Section Break",
+      "label": "State Transition",
+      "depends_on": "eval:doc.log_type=='ORDER'"
+    },
+    {
+      "fieldname": "from_state",
+      "fieldtype": "Data",
+      "label": "From State"
+    },
+    {
+      "fieldname": "to_state",
+      "fieldtype": "Data",
+      "label": "To State"
+    },
+    {
+      "fieldname": "triggered_by",
+      "fieldtype": "Data",
+      "label": "Triggered By"
+    },
+    {
+      "fieldname": "section_break_performance",
+      "fieldtype": "Section Break",
+      "label": "Performance"
+    },
+    {
+      "fieldname": "latency_ms",
+      "fieldtype": "Int",
+      "label": "Latency (ms)"
+    },
+    {
+      "fieldname": "section_break_data",
+      "fieldtype": "Section Break",
+      "label": "Request/Response Data",
+      "collapsible": 1
+    },
+    {
+      "fieldname": "request_data",
+      "fieldtype": "Code",
+      "label": "Request Data",
+      "options": "JSON"
+    },
+    {
+      "fieldname": "response_data",
+      "fieldtype": "Code",
+      "label": "Response Data",
+      "options": "JSON"
+    }
+  ],
+  "index_web_pages_for_search": 0,
+  "links": [],
+  "modified": "2024-01-15 10:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "ONDC Seller App",
+  "name": "ONDC Compliance Log",
+  "naming_rule": "Expression",
+  "owner": "Administrator",
+  "permissions": [
+    {
+      "create": 1,
+      "delete": 1,
+      "email": 1,
+      "export": 1,
+      "print": 1,
+      "read": 1,
+      "report": 1,
+      "role": "System Manager",
+      "share": 1
+    },
+    {
+      "read": 1,
+      "report": 1,
+      "role": "ONDC Manager"
+    }
+  ],
+  "sort_field": "timestamp",
+  "sort_order": "DESC",
+  "track_changes": 0
+}

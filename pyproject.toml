@@ -21,5 +21,10 @@ build-backend = "flit_core.buildapi"
 frappe = ">=15.0.0,<16.0.0"
 erpnext = ">=15.0.0,<16.0.0"
 
+[tool.bench.optional-dependencies]
+# Helpdesk integration for IGM (Issue & Grievance Management)
+# Install with: bench get-app helpdesk
+helpdesk = ">=1.0.0"
+
 [tool.bench.dev-dependencies]
 pre-commit = "~3.3.2"

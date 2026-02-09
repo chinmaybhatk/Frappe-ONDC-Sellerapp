@@ -43,8 +43,15 @@ scheduler_events = {
     ]
 }
 
-# Website routes - includes both webhook handler and /on_subscribe endpoint
+# Website routes - includes webhook handler, registry, IGM, and RSP endpoints
 website_route_rules = [
+    # Core ONDC webhook handler (search, select, init, confirm, status, etc.)
     {"from_route": "/ondc/webhook/<path:api>", "to_route": "ondc_seller_app.api.webhook.handle_webhook"},
-    {"from_route": "/on_subscribe", "to_route": "ondc_seller_app.api.ondc_client.handle_on_subscribe"}
+    # Registry onboarding callback
+    {"from_route": "/on_subscribe", "to_route": "ondc_seller_app.api.ondc_client.handle_on_subscribe"},
+    # IGM (Issue & Grievance Management) endpoints
+    {"from_route": "/issue", "to_route": "ondc_seller_app.api.igm_adapter.issue"},
+    {"from_route": "/issue_status", "to_route": "ondc_seller_app.api.igm_adapter.issue_status"},
+    # RSP (Reconciliation & Settlement Protocol) endpoints
+    {"from_route": "/receiver_recon", "to_route": "ondc_seller_app.api.rsp_adapter.receiver_recon"},
 ]

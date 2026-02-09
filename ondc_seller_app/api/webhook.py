@@ -69,6 +69,7 @@ def handle_webhook(api):
         
         # --- Step 6: Enqueue async processing ---
         handler_map = {
+            # Core ONDC transaction APIs
             "search": "ondc_seller_app.api.webhook.process_search",
             "select": "ondc_seller_app.api.webhook.process_select",
             "init": "ondc_seller_app.api.webhook.process_init",
@@ -79,6 +80,11 @@ def handle_webhook(api):
             "update": "ondc_seller_app.api.webhook.process_update",
             "rating": "ondc_seller_app.api.webhook.process_rating",
             "support": "ondc_seller_app.api.webhook.process_support",
+            # IGM (Issue & Grievance Management) APIs
+            "issue": "ondc_seller_app.api.webhook.process_issue",
+            "issue_status": "ondc_seller_app.api.webhook.process_issue_status",
+            # RSP (Reconciliation & Settlement Protocol) APIs
+            "receiver_recon": "ondc_seller_app.api.webhook.process_receiver_recon",
         }
         
         handler_method = handler_map.get(api)
@@ -685,3 +691,50 @@ def _update_webhook_log(log_name, status=None, response=None, error_message=None
         frappe.db.commit()
     except Exception:
         frappe.log_error(traceback.format_exc(), "ONDC Webhook Log Update Error")
+
+
+# ---------------------------------------------------------------------------
+# IGM (Issue & Grievance Management) Handlers
+# ---------------------------------------------------------------------------
+
+def process_issue(data, log_name=None):
+    """Process /issue request - creates ticket in Helpdesk"""
+    try:
+        from ondc_seller_app.api.igm_adapter import IGMAdapter
+
+        adapter = IGMAdapter()
+        result = adapter.handle_issue(data)
+        _update_webhook_log(log_name, status="Processed", response=result)
+    except Exception as e:
+        frappe.log_error(traceback.format_exc(), "ONDC process_issue Error")
+        _update_webhook_log(log_name, status="Failed", error_message=str(e))
+
+
+def process_issue_status(data, log_name=None):
+    """Process /issue_status request - returns ticket status"""
+    try:
+        from ondc_seller_app.api.igm_adapter import IGMAdapter
+
+        adapter = IGMAdapter()
+        result = adapter.handle_issue_status(data)
+        _update_webhook_log(log_name, status="Processed", response=result)
+    except Exception as e:
+        frappe.log_error(traceback.format_exc(), "ONDC process_issue_status Error")
+        _update_webhook_log(log_name, status="Failed", error_message=str(e))
+
+
+# ---------------------------------------------------------------------------
+# RSP (Reconciliation & Settlement Protocol) Handlers
+# ---------------------------------------------------------------------------
+
+def process_receiver_recon(data, log_name=None):
+    """Process /receiver_recon request - reconciles settlements"""
+    try:
+        from ondc_seller_app.api.rsp_adapter import RSPAdapter
+
+        adapter = RSPAdapter()
+        result = adapter.handle_receiver_recon(data)
+        _update_webhook_log(log_name, status="Processed", response=result)
+    except Exception as e:
+        frappe.log_error(traceback.format_exc(), "ONDC process_receiver_recon Error")
+        _update_webhook_log(log_name, status="Failed", error_message=str(e))
