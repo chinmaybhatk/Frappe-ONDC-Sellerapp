@@ -101,8 +101,7 @@
   {
    "fieldname": "created_at",
    "fieldtype": "Datetime",
-   "label": "Created At",
-   
+   "label": "Created At"
   },
   {
    "fieldname": "customer_section",
