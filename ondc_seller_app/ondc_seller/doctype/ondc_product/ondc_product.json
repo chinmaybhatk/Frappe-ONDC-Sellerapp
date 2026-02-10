@@ -8,6 +8,7 @@
  "engine": "InnoDB",
  "field_order": [
   "item_code",
+  "website_item",
   "ondc_product_id",
   "category_code",
   "column_break_1",
@@ -56,9 +57,16 @@
   {
    "fieldname": "item_code",
    "fieldtype": "Link",
-   "label": "Item",
+   "label": "ERPNext Item",
    "options": "Item",
-   "reqd": 1
+   "description": "Link to ERPNext Item (for Item sync)"
+  },
+  {
+   "fieldname": "website_item",
+   "fieldtype": "Link",
+   "label": "Website Item",
+   "options": "Website Item",
+   "description": "Link to Website Item (for Webshop sync)"
   },
   {
    "fieldname": "ondc_product_id",

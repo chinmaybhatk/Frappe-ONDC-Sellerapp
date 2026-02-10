@@ -167,6 +167,138 @@ Once deployed, your app exposes these endpoints:
 
 ---
 
+## Product Sync
+
+The app supports two sync sources for products. Choose based on your business model:
+
+| Sync Source | Best For | Features |
+|-------------|----------|----------|
+| **ERPNext Item** | B2B sellers, Inventory-focused | Direct inventory integration, Stock sync |
+| **Frappe Webshop** | B2C sellers, E-commerce | Multiple images, Web pricing, Slideshow |
+| **Both** | Hybrid businesses | Sync from both sources |
+
+### Configure Sync Source
+
+1. Go to **ONDC Settings**
+2. Under **Product Sync Settings**, select **Product Sync Source**:
+   - `ERPNext Item` - Sync from ERPNext Item master
+   - `Frappe Webshop` - Sync from Website Items
+   - `Both` - Enable both sync sources
+
+---
+
+## Option 1: ERPNext Item Sync
+
+Best for B2B sellers using ERPNext for inventory management.
+
+### How It Works
+
+1. **Enable Sync on Item**: Check the "Sync to ONDC" checkbox on any Item
+2. **Auto-Create**: When Item is saved, an ONDC Product is automatically created
+3. **Auto-Update**: Changes to Item (price, description, image) sync to ONDC Product
+4. **Category Mapping**: Item Groups are auto-mapped to ONDC categories
+
+### Setting Up Item Sync
+
+#### Sync Individual Items
+1. Open any Item in ERPNext
+2. Check **"Sync to ONDC"** checkbox (in the first section)
+3. Optionally set **Country of Origin** and **ONDC Category**
+4. Save the Item
+
+#### Bulk Sync Existing Items
+
+Run from Frappe Console:
+```python
+# Enable sync for all items in a group
+from ondc_seller_app.utils.bulk_sync import enable_ondc_sync_for_item_group
+enable_ondc_sync_for_item_group('Grocery')
+
+# Sync all enabled items
+from ondc_seller_app.utils.bulk_sync import sync_all_items_to_ondc
+sync_all_items_to_ondc()
+```
+
+Or call the API:
+```bash
+curl -X POST https://your-site.frappe.cloud/api/method/ondc_seller_app.utils.bulk_sync.bulk_sync_items \
+  -H "Authorization: token api_key:api_secret" \
+  -d '{"item_group": "Grocery"}'
+```
+
+### Custom Fields Added to Item
+
+| Field | Description |
+|-------|-------------|
+| **Sync to ONDC** | Enable/disable ONDC sync for this item |
+| **ONDC Product ID** | Auto-generated link to ONDC Product |
+| **Country of Origin** | Required for ONDC (defaults to India) |
+| **ONDC Category** | Override auto-detected category |
+| **Sync Status** | Current sync status (Synced/Failed/Pending) |
+| **Last Synced** | Timestamp of last successful sync |
+
+---
+
+## Option 2: Frappe Webshop Sync
+
+Best for B2C sellers with consumer-facing websites using Frappe Webshop.
+
+### How It Works
+
+1. **Enable Sync on Website Item**: Check "Sync to ONDC" checkbox
+2. **Rich Media**: Multiple images from Website Item slideshow are synced
+3. **Web Pricing**: Uses Webshop pricing rules
+4. **Auto-Update**: Changes sync automatically
+
+### Setting Up Webshop Sync
+
+1. Ensure **Frappe Webshop** is installed
+2. Go to ONDC Settings → Set **Product Sync Source** to `Frappe Webshop` or `Both`
+3. Open any **Website Item**
+4. Check **"Sync to ONDC"** checkbox
+5. Set **Country of Origin** and optionally **ONDC Category**
+6. Save
+
+### Custom Fields Added to Website Item
+
+| Field | Description |
+|-------|-------------|
+| **Sync to ONDC** | Enable/disable ONDC sync |
+| **ONDC Product ID** | Auto-generated link to ONDC Product |
+| **Country of Origin** | Required for ONDC (defaults to India) |
+| **ONDC Category** | Override auto-detected category |
+| **Sync Status** | Current sync status |
+| **Last Synced** | Timestamp of last successful sync |
+
+### Webshop Advantages
+
+- **Multiple Images**: Syncs all images from Website Item slideshow
+- **Web-specific Pricing**: Uses Webshop pricing rules and discounts
+- **SEO Data**: Can leverage web-optimized descriptions
+- **Variant Support**: Works with Website Item variants
+
+---
+
+## Category Mapping
+
+Item Groups are automatically mapped to ONDC categories:
+
+| Item Group | ONDC Category |
+|------------|---------------|
+| Grocery | ONDC:RET10 |
+| Food & Beverages | ONDC:RET11 |
+| Fashion | ONDC:RET12 |
+| Beauty & Personal Care | ONDC:RET13 |
+| Electronics | ONDC:RET14 |
+| Home & Decor | ONDC:RET15 |
+| Health & Wellness | ONDC:RET16 |
+| Pharma | ONDC:RET17 |
+| Agriculture | ONDC:RET18 |
+
+You can override this by setting the ONDC Category field on the Item or Website Item.
+
+---
+
 ## DocTypes
 
 ### ONDC Settings
@@ -174,6 +306,7 @@ Single DocType for all ONDC configuration. Access via `ONDC Settings` in search.
 
 ### ONDC Product
 Manages product catalog with ONDC-specific attributes:
+- Linked to ERPNext Item (auto-synced)
 - ONDC Product ID
 - Category mappings
 - Statutory requirements (FSSAI, brand owner, etc.)

@@ -10,21 +10,28 @@ app_license = "MIT"
 # After app install
 after_install = "ondc_seller_app.after_install.after_install"
 
-# Fixtures
+# Fixtures - includes custom fields for Item, Website Item, Sales Order, Customer
 fixtures = [
     {
         "doctype": "Custom Field",
         "filters": [
-            ["dt", "in", ["Item", "Sales Order", "Customer", "Customer Group"]]
+            ["dt", "in", ["Item", "Website Item", "Sales Order", "Customer", "Customer Group"]]
         ]
     }
 ]
 
 # Document Events
+# Product sync is controlled by ONDC Settings (sync_source field)
+# Both hooks are registered but check settings before executing
 doc_events = {
     "Item": {
         "after_insert": "ondc_seller_app.utils.item_hooks.create_ondc_product",
         "on_update": "ondc_seller_app.utils.item_hooks.update_ondc_product"
+    },
+    "Website Item": {
+        "after_insert": "ondc_seller_app.utils.webshop_hooks.create_ondc_product_from_website_item",
+        "on_update": "ondc_seller_app.utils.webshop_hooks.update_ondc_product_from_website_item",
+        "on_trash": "ondc_seller_app.utils.webshop_hooks.on_website_item_delete"
     },
     "Sales Order": {
         "after_insert": "ondc_seller_app.utils.order_hooks.create_ondc_order",

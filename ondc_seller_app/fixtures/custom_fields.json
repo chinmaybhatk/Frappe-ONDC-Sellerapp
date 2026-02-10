@@ -7,7 +7,8 @@
         "fieldtype": "Check",
         "label": "Sync to ONDC",
         "insert_after": "is_stock_item",
-        "description": "Enable to sync this item to ONDC network"
+        "description": "Enable to sync this item to ONDC network. When checked, this item will be automatically synced to your ONDC catalog.",
+        "bold": 1
     },
     {
         "doctype": "Custom Field",
@@ -17,7 +18,8 @@
         "fieldtype": "Section Break",
         "label": "ONDC Details",
         "insert_after": "website_section",
-        "collapsible": 1
+        "collapsible": 1,
+        "depends_on": "eval:doc.sync_to_ondc"
     },
     {
         "doctype": "Custom Field",
@@ -27,7 +29,8 @@
         "fieldtype": "Data",
         "label": "ONDC Product ID",
         "insert_after": "ondc_section",
-        "read_only": 1
+        "read_only": 1,
+        "description": "Auto-generated when synced to ONDC"
     },
     {
         "doctype": "Custom Field",
@@ -38,7 +41,40 @@
         "label": "Country of Origin",
         "options": "Country",
         "insert_after": "ondc_product_id",
-        "default": "India"
+        "default": "India",
+        "mandatory_depends_on": "eval:doc.sync_to_ondc"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-ondc_category_code",
+        "dt": "Item",
+        "fieldname": "ondc_category_code",
+        "fieldtype": "Select",
+        "label": "ONDC Category",
+        "insert_after": "country_of_origin",
+        "options": "\nONDC:RET10 - Grocery\nONDC:RET11 - F&B\nONDC:RET12 - Fashion\nONDC:RET13 - BPC\nONDC:RET14 - Electronics\nONDC:RET15 - Home & Decor\nONDC:RET16 - Health & Wellness\nONDC:RET17 - Pharma\nONDC:RET18 - Agriculture",
+        "description": "Override category (auto-detected from Item Group if not set)"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-ondc_sync_status",
+        "dt": "Item",
+        "fieldname": "ondc_sync_status",
+        "fieldtype": "Select",
+        "label": "Sync Status",
+        "insert_after": "ondc_category_code",
+        "options": "\nNot Synced\nSynced\nSync Failed\nPending Update",
+        "read_only": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Item-ondc_last_synced",
+        "dt": "Item",
+        "fieldname": "ondc_last_synced",
+        "fieldtype": "Datetime",
+        "label": "Last Synced",
+        "insert_after": "ondc_sync_status",
+        "read_only": 1
     },
     {
         "doctype": "Custom Field",
@@ -69,5 +105,82 @@
         "label": "Is ONDC Group",
         "insert_after": "is_group",
         "description": "Check if this is the default group for ONDC customers"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-sync_to_ondc",
+        "dt": "Website Item",
+        "fieldname": "sync_to_ondc",
+        "fieldtype": "Check",
+        "label": "Sync to ONDC",
+        "insert_after": "published",
+        "description": "Enable to sync this Website Item to ONDC network",
+        "bold": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-ondc_section",
+        "dt": "Website Item",
+        "fieldname": "ondc_section",
+        "fieldtype": "Section Break",
+        "label": "ONDC Details",
+        "insert_after": "website_warehouse",
+        "collapsible": 1,
+        "depends_on": "eval:doc.sync_to_ondc"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-ondc_product_id",
+        "dt": "Website Item",
+        "fieldname": "ondc_product_id",
+        "fieldtype": "Data",
+        "label": "ONDC Product ID",
+        "insert_after": "ondc_section",
+        "read_only": 1,
+        "description": "Auto-generated when synced to ONDC"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-country_of_origin",
+        "dt": "Website Item",
+        "fieldname": "country_of_origin",
+        "fieldtype": "Link",
+        "label": "Country of Origin",
+        "options": "Country",
+        "insert_after": "ondc_product_id",
+        "default": "India",
+        "mandatory_depends_on": "eval:doc.sync_to_ondc"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-ondc_category_code",
+        "dt": "Website Item",
+        "fieldname": "ondc_category_code",
+        "fieldtype": "Select",
+        "label": "ONDC Category",
+        "insert_after": "country_of_origin",
+        "options": "\nONDC:RET10 - Grocery\nONDC:RET11 - F&B\nONDC:RET12 - Fashion\nONDC:RET13 - BPC\nONDC:RET14 - Electronics\nONDC:RET15 - Home & Decor\nONDC:RET16 - Health & Wellness\nONDC:RET17 - Pharma\nONDC:RET18 - Agriculture",
+        "description": "Override category (auto-detected from Item Group if not set)"
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-ondc_sync_status",
+        "dt": "Website Item",
+        "fieldname": "ondc_sync_status",
+        "fieldtype": "Select",
+        "label": "Sync Status",
+        "insert_after": "ondc_category_code",
+        "options": "\nNot Synced\nSynced\nSync Failed\nPending Update",
+        "read_only": 1
+    },
+    {
+        "doctype": "Custom Field",
+        "name": "Website Item-ondc_last_synced",
+        "dt": "Website Item",
+        "fieldname": "ondc_last_synced",
+        "fieldtype": "Datetime",
+        "label": "Last Synced",
+        "insert_after": "ondc_sync_status",
+        "read_only": 1
     }
 ]

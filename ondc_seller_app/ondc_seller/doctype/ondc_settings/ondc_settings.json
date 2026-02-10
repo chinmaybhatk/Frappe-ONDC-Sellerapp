@@ -53,7 +53,9 @@
   "consumer_care_phone",
   "consumer_care_email",
   "sync_section",
+  "product_sync_source",
   "auto_sync_products",
+  "column_break_sync",
   "auto_sync_inventory",
   "auto_sync_orders",
   "section_break_1",
@@ -317,22 +319,36 @@
   {
    "fieldname": "sync_section",
    "fieldtype": "Section Break",
-   "label": "Sync Settings"
+   "label": "Product Sync Settings"
+  },
+  {
+   "fieldname": "product_sync_source",
+   "fieldtype": "Select",
+   "label": "Product Sync Source",
+   "options": "\nERPNext Item\nFrappe Webshop\nBoth",
+   "description": "Choose where to sync products from. ERPNext Item for B2B, Frappe Webshop for B2C, or Both for hybrid."
   },
   {
    "fieldname": "auto_sync_products",
    "fieldtype": "Check",
-   "label": "Auto Sync Products"
+   "label": "Auto Sync to ONDC Network",
+   "description": "Automatically push product changes to ONDC network"
+  },
+  {
+   "fieldname": "column_break_sync",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "auto_sync_inventory",
    "fieldtype": "Check",
-   "label": "Auto Sync Inventory"
+   "label": "Auto Sync Inventory",
+   "description": "Sync stock levels from ERPNext warehouse"
   },
   {
    "fieldname": "auto_sync_orders",
    "fieldtype": "Check",
-   "label": "Auto Sync Orders"
+   "label": "Auto Create Sales Order",
+   "description": "Automatically create ERPNext Sales Order from ONDC orders"
   },
   {
    "fieldname": "section_break_1",
