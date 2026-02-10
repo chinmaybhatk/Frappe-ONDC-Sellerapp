@@ -257,7 +257,7 @@
   "links": [],
   "modified": "2024-01-15 10:00:00.000000",
   "modified_by": "Administrator",
-  "module": "ONDC Seller App",
+  "module": "ondc_seller",
   "name": "ONDC Compliance Log",
   "naming_rule": "Expression",
   "owner": "Administrator",
