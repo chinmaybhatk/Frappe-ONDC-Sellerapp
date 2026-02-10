@@ -62,7 +62,6 @@
    "fieldname": "created_at",
    "fieldtype": "Datetime",
    "label": "Created At",
-   "default": "__timestamp",
    "in_list_view": 1
   },
   {
@@ -96,7 +95,7 @@
  "links": [],
  "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
- "module": "ONDC Seller",
+ "module": "ondc_seller",
  "name": "ONDC Webhook Log",
  "owner": "Administrator",
  "permissions": [

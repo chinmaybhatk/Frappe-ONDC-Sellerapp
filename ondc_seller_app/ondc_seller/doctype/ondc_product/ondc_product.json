@@ -296,7 +296,7 @@
  "links": [],
  "modified": "2025-06-14 12:00:00.000000",
  "modified_by": "Administrator",
- "module": "ONDC Seller",
+ "module": "ondc_seller",
  "name": "ONDC Product",
  "owner": "Administrator",
  "permissions": [
