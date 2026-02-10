@@ -34,24 +34,12 @@
     },
     {
         "doctype": "Custom Field",
-        "name": "Item-country_of_origin",
-        "dt": "Item",
-        "fieldname": "country_of_origin",
-        "fieldtype": "Link",
-        "label": "Country of Origin",
-        "options": "Country",
-        "insert_after": "ondc_product_id",
-        "default": "India",
-        "mandatory_depends_on": "eval:doc.sync_to_ondc"
-    },
-    {
-        "doctype": "Custom Field",
         "name": "Item-ondc_category_code",
         "dt": "Item",
         "fieldname": "ondc_category_code",
         "fieldtype": "Select",
         "label": "ONDC Category",
-        "insert_after": "country_of_origin",
+        "insert_after": "ondc_product_id",
         "options": "\nONDC:RET10 - Grocery\nONDC:RET11 - F&B\nONDC:RET12 - Fashion\nONDC:RET13 - BPC\nONDC:RET14 - Electronics\nONDC:RET15 - Home & Decor\nONDC:RET16 - Health & Wellness\nONDC:RET17 - Pharma\nONDC:RET18 - Agriculture",
         "description": "Override category (auto-detected from Item Group if not set)"
     },
@@ -141,9 +129,9 @@
     },
     {
         "doctype": "Custom Field",
-        "name": "Website Item-country_of_origin",
+        "name": "Website Item-ondc_country_of_origin",
         "dt": "Website Item",
-        "fieldname": "country_of_origin",
+        "fieldname": "ondc_country_of_origin",
         "fieldtype": "Link",
         "label": "Country of Origin",
         "options": "Country",
@@ -158,7 +146,7 @@
         "fieldname": "ondc_category_code",
         "fieldtype": "Select",
         "label": "ONDC Category",
-        "insert_after": "country_of_origin",
+        "insert_after": "ondc_country_of_origin",
         "options": "\nONDC:RET10 - Grocery\nONDC:RET11 - F&B\nONDC:RET12 - Fashion\nONDC:RET13 - BPC\nONDC:RET14 - Electronics\nONDC:RET15 - Home & Decor\nONDC:RET16 - Health & Wellness\nONDC:RET17 - Pharma\nONDC:RET18 - Agriculture",
         "description": "Override category (auto-detected from Item Group if not set)"
     },

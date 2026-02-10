@@ -39,9 +39,9 @@ def create_ondc_product_from_website_item(doc, method):
         if doc.item_code:
             item = frappe.get_cached_doc('Item', doc.item_code)
             ondc_product.brand = item.brand
-            ondc_product.country_of_origin = doc.get('country_of_origin') or item.get('country_of_origin') or 'IND'
+            ondc_product.country_of_origin = doc.get('ondc_country_of_origin') or item.get('country_of_origin') or 'IND'
         else:
-            ondc_product.country_of_origin = doc.get('country_of_origin') or 'IND'
+            ondc_product.country_of_origin = doc.get('ondc_country_of_origin') or 'IND'
 
         # Set category
         if doc.get('ondc_category_code'):
@@ -106,7 +106,7 @@ def update_ondc_product_from_website_item(doc, method):
         if doc.item_code:
             item = frappe.get_cached_doc('Item', doc.item_code)
             ondc_product.brand = item.brand
-            ondc_product.country_of_origin = doc.get('country_of_origin') or item.get('country_of_origin') or ondc_product.country_of_origin
+            ondc_product.country_of_origin = doc.get('ondc_country_of_origin') or item.get('country_of_origin') or ondc_product.country_of_origin
 
         # Update category if explicitly set
         if doc.get('ondc_category_code'):
