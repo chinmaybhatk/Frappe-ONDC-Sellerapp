@@ -40,8 +40,8 @@ Handles order lifecycle from placement to fulfillment
 
 ### ONDC Webhook Log
 Logs all incoming webhooks for debugging and audit
+
 ## Testing on Pramaan
-This screenshot shows **Step 2: Verify your build** - you need to test your integration using **Pramaan**, which is ONDC's automated testing tool.
 
 ## What is Pramaan?
 
