@@ -73,7 +73,8 @@
    "fieldtype": "Data",
    "label": "ONDC Product ID",
    "unique": 1,
-   "read_only": 0
+   "read_only": 0,
+   "description": "Auto-generated if left blank. Format: PROD-{item_code}-{hash}"
   },
   {
    "fieldname": "category_code",

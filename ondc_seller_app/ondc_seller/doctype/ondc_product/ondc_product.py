@@ -5,22 +5,27 @@ import json
 
 class ONDCProduct(Document):
     def before_insert(self):
-        """Generate ONDC Product ID before Frappe's autoname runs.
-        autoname is 'field:ondc_product_id', so the field must be populated
-        before the document is inserted."""
+        """Auto-generate ONDC Product ID before Frappe's autoname runs.
+        autoname is set to 'field:ondc_product_id', so this field MUST
+        be populated before insert — validate() runs too late."""
         if not self.ondc_product_id:
             self.ondc_product_id = self.generate_ondc_product_id()
 
     def validate(self):
+        # Safety net: also generate on update if somehow missing
+        if not self.ondc_product_id:
+            self.ondc_product_id = self.generate_ondc_product_id()
+
         # Validate minimum and maximum quantity
         if self.minimum_quantity and self.maximum_quantity:
             if self.minimum_quantity > self.maximum_quantity:
                 frappe.throw("Minimum quantity cannot be greater than maximum quantity")
 
     def generate_ondc_product_id(self):
-        """Generate unique ONDC product ID"""
-        prefix = self.item_code or self.product_name or "ITEM"
-        return f"PROD-{prefix}-{frappe.generate_hash(length=8).upper()}"
+        """Generate unique ONDC product ID.
+        Format: PROD-{item_code}-{8char_hash} or PROD-{hash} if no item_code."""
+        prefix = f"PROD-{self.item_code}" if self.item_code else "PROD"
+        return f"{prefix}-{frappe.generate_hash(length=8).upper()}"
 
     @frappe.whitelist()
     def sync_to_ondc(self):

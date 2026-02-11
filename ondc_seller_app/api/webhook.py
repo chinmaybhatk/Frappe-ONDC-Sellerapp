@@ -738,3 +738,66 @@ def process_receiver_recon(data, log_name=None):
     except Exception as e:
         frappe.log_error(traceback.format_exc(), "ONDC process_receiver_recon Error")
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Root-level ONDC endpoint wrappers
+# ---------------------------------------------------------------------------
+# These are individually whitelisted functions that Frappe exposes at:
+#   /api/method/ondc_seller_app.api.webhook.<action>
+# They also serve as targets for website_route_rules at root level:
+#   /search -> handle_search -> handle_webhook("search")
+#
+# This ensures routing works reliably on Frappe Cloud where
+# website_route_rules with <path:api> wildcards may fail.
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist(allow_guest=True)
+def handle_search(**kwargs):
+    """Root-level /search endpoint"""
+    return handle_webhook("search")
+
+@frappe.whitelist(allow_guest=True)
+def handle_select(**kwargs):
+    """Root-level /select endpoint"""
+    return handle_webhook("select")
+
+@frappe.whitelist(allow_guest=True)
+def handle_init(**kwargs):
+    """Root-level /init endpoint"""
+    return handle_webhook("init")
+
+@frappe.whitelist(allow_guest=True)
+def handle_confirm(**kwargs):
+    """Root-level /confirm endpoint"""
+    return handle_webhook("confirm")
+
+@frappe.whitelist(allow_guest=True)
+def handle_status(**kwargs):
+    """Root-level /status endpoint"""
+    return handle_webhook("status")
+
+@frappe.whitelist(allow_guest=True)
+def handle_track(**kwargs):
+    """Root-level /track endpoint"""
+    return handle_webhook("track")
+
+@frappe.whitelist(allow_guest=True)
+def handle_cancel(**kwargs):
+    """Root-level /cancel endpoint"""
+    return handle_webhook("cancel")
+
+@frappe.whitelist(allow_guest=True)
+def handle_update(**kwargs):
+    """Root-level /update endpoint"""
+    return handle_webhook("update")
+
+@frappe.whitelist(allow_guest=True)
+def handle_rating(**kwargs):
+    """Root-level /rating endpoint"""
+    return handle_webhook("rating")
+
+@frappe.whitelist(allow_guest=True)
+def handle_support(**kwargs):
+    """Root-level /support endpoint"""
+    return handle_webhook("support")
