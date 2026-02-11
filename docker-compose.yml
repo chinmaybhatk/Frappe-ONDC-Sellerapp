@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Infrastructure
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ondc
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  # ONDC Services (uncomment as implemented)
+
+  # bap:
+  #   build:
+  #     context: ./bap
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3001:3001"
+  #   depends_on:
+  #     - mongodb
+  #     - redis
+  #   env_file:
+  #     - ./config/staging/.env.bap
+
+  # bpp:
+  #   build:
+  #     context: ./bpp
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3002:3002"
+  #   depends_on:
+  #     - mongodb
+  #     - redis
+  #     - elasticsearch
+  #   env_file:
+  #     - ./config/staging/.env.bpp
+
+  # gateway:
+  #   build:
+  #     context: ./gateway
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3003:3003"
+  #   depends_on:
+  #     - redis
+  #   env_file:
+  #     - ./config/staging/.env.gateway
+
+  # registry:
+  #   build:
+  #     context: ./registry
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3004:3004"
+  #   depends_on:
+  #     - mongodb
+  #     - redis
+  #   env_file:
+  #     - ./config/staging/.env.registry
+
+volumes:
+  mongodb_data:
+  redis_data:
+  elasticsearch_data:
+  rabbitmq_data:

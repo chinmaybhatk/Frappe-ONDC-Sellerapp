@@ -1,0 +1,40 @@
+{
+  "name": "ondc-network",
+  "version": "0.1.0",
+  "description": "ONDC (Open Network for Digital Commerce) - All Roles Implementation",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "bap",
+    "bpp",
+    "gateway",
+    "registry",
+    "logistics",
+    "igm"
+  ],
+  "scripts": {
+    "dev:bap": "cd bap && npm run dev",
+    "dev:bpp": "cd bpp && npm run dev",
+    "dev:gateway": "cd gateway && npm run dev",
+    "dev:registry": "cd registry && npm run dev",
+    "dev:logistics": "cd logistics && npm run dev",
+    "dev:igm": "cd igm && npm run dev",
+    "test": "npm run test --workspaces",
+    "lint": "eslint . --ext .js,.ts",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "keywords": [
+    "ondc",
+    "beckn",
+    "digital-commerce",
+    "bap",
+    "bpp",
+    "gateway",
+    "registry"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
