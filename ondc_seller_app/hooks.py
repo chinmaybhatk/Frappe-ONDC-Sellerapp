@@ -10,6 +10,10 @@ app_license = "MIT"
 # After app install
 after_install = "ondc_seller_app.after_install.after_install"
 
+# Before request middleware – rewrites root-level ONDC paths (e.g. /search)
+# to /api/method/… so Frappe Cloud resolves them without nginx changes.
+before_request = ["ondc_seller_app.middleware.before_request"]
+
 # Fixtures - includes custom fields for Item, Website Item, Sales Order, Customer
 fixtures = [
     {
