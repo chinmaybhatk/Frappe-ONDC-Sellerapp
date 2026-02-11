@@ -41,10 +41,23 @@ class ONDCClient:
             f"digest: BLAKE-512={self._calculate_digest(request_body)}"
         )
 
-        private_key = nacl.signing.SigningKey(
-            self.settings.signing_private_key,
-            encoder=nacl.encoding.Base64Encoder,
-        )
+        # Frappe Password fields must be retrieved via get_password()
+        signing_private_key = self.settings.get_password("signing_private_key")
+        if not signing_private_key:
+            frappe.throw("Signing private key is not set. Please generate key pairs first.")
+
+        # Decode base64 to get raw bytes, then extract 32-byte seed if needed
+        raw_key = base64.b64decode(signing_private_key)
+        if len(raw_key) == 64:
+            # Full Ed25519 key (seed + public key) — take only the 32-byte seed
+            raw_key = raw_key[:32]
+        elif len(raw_key) != 32:
+            frappe.throw(
+                f"Invalid signing private key: expected 32 or 64 bytes, got {len(raw_key)}. "
+                "Please regenerate key pairs."
+            )
+
+        private_key = nacl.signing.SigningKey(raw_key)
         signature = private_key.sign(signing_string.encode()).signature
         signature_b64 = base64.b64encode(signature).decode()
 
@@ -198,7 +211,10 @@ class ONDCClient:
                 return {"success": False, "error": "No challenge provided"}
 
             # Decrypt the challenge using X25519 private key
-            enc_private_key_b64 = self.settings.encryption_private_key
+            # Frappe Password fields must be retrieved via get_password()
+            enc_private_key_b64 = self.settings.get_password("encryption_private_key")
+            if not enc_private_key_b64:
+                return {"success": False, "error": "Encryption private key is not set"}
             enc_private_key_bytes = base64.b64decode(enc_private_key_b64)
 
             # The challenge is encrypted with the public key; decrypt with private key
