@@ -118,23 +118,53 @@ class ONDCClient:
             response.raise_for_status()
             return {"success": True, "data": response.json()}
         except requests.exceptions.RequestException as e:
-            frappe.log_error(f"ONDC Callback Error: {str(e)}", "ONDC Client")
-            return {"success": False, "error": str(e)}
+            # Capture response body for debugging 400/500 errors
+            error_detail = str(e)
+            response_body = ""
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    response_body = e.response.text[:500]
+                    error_detail = f"{str(e)} | Response: {response_body}"
+                except Exception:
+                    pass
+            frappe.log_error(
+                f"ONDC Callback Error to {url}:\n{error_detail}\n\nPayload context: {json.dumps(payload.get('context', {}), indent=2)}",
+                "ONDC Callback"
+            )
+            return {"success": False, "error": str(e), "response_body": response_body}
 
     # -----------------------------------------------------------------------
     # Context
     # -----------------------------------------------------------------------
     def create_context(self, action, request_context=None):
         """
-        Create context object for response.
-        FIX: message_id now echoes the original request's message_id on callbacks.
+        Create context object for callback responses (on_search, on_select, etc.).
+
+        CRITICAL: The ONDC gateway validates that callback context matches the
+        original request context. Fields like domain, city, country, core_version,
+        transaction_id, message_id MUST be echoed from the incoming request.
+        Overriding them with settings values causes 400 Bad Request.
         """
         context = {
-            "domain": self.settings.domain,
-            "country": "IND",
-            "city": self.settings.city,
+            # Echo domain/city/country/core_version from request context
+            # The ONDC gateway validates these match the original request
+            "domain": (
+                (request_context.get("domain") if request_context else None)
+                or self.settings.domain
+            ),
+            "country": (
+                (request_context.get("country") if request_context else None)
+                or "IND"
+            ),
+            "city": (
+                (request_context.get("city") if request_context else None)
+                or self.settings.city
+            ),
             "action": action,
-            "core_version": "1.2.0",
+            "core_version": (
+                (request_context.get("core_version") if request_context else None)
+                or "1.2.0"
+            ),
             "bap_id": request_context.get("bap_id") if request_context else None,
             "bap_uri": request_context.get("bap_uri") if request_context else None,
             "bpp_id": self.settings.subscriber_id,
@@ -144,7 +174,6 @@ class ONDCClient:
                 if request_context
                 else frappe.generate_hash(length=16)
             ),
-            # FIX: echo the original message_id on callbacks
             "message_id": (
                 request_context.get("message_id")
                 if request_context

@@ -46,7 +46,9 @@ def handle_webhook(api):
         
         is_valid_sig, sig_error = verify_request(data, auth_header, gateway_auth_header)
         if not is_valid_sig:
-            frappe.log_error(f"Signature verification failed for {api}: {sig_error}", "ONDC Auth")
+            # Truncate title to stay within Frappe's 140 char limit for Error Log title
+            log_title = f"ONDC Auth: {api} sig fail"
+            frappe.log_error(f"Signature verification failed for {api}: {sig_error}", log_title[:140])
             # Log but don't block in staging/preprod - many test BAPs have mismatched keys
             settings = frappe.get_single("ONDC Settings")
             if settings.environment == "prod":

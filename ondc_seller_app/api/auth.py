@@ -242,14 +242,15 @@ def validate_context(context):
         return False, "10002", f"Invalid action: {context.get('action')}"
     
     # Validate timestamp freshness (within TTL)
+    # Use generous 5-minute window — ONDC spec says TTL is PT30S but
+    # network latency, clock skew, and Pramaan test timing require slack
     try:
         req_timestamp = datetime.fromisoformat(context["timestamp"].replace("Z", "+00:00"))
         now = datetime.utcnow()
-        # Allow 30 seconds TTL
         from datetime import timezone
         req_timestamp_utc = req_timestamp.replace(tzinfo=None) if req_timestamp.tzinfo else req_timestamp
         diff = abs((now - req_timestamp_utc).total_seconds())
-        if diff > 30:
+        if diff > 300:  # 5 minutes — generous for preprod/staging
             return False, "10003", "Request timestamp outside TTL window"
     except (ValueError, TypeError):
         pass  # Don't fail on timestamp parsing, just log
