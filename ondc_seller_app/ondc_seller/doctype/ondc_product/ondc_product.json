@@ -73,7 +73,7 @@
    "fieldtype": "Data",
    "label": "ONDC Product ID",
    "unique": 1,
-   "read_only": 1
+   "read_only": 0
   },
   {
    "fieldname": "category_code",
