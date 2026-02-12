@@ -36,11 +36,32 @@ def handle_webhook(api):
 
         context = data.get("context", {})
 
+        # Build the context to echo back in ACK/NACK responses.
+        # ONDC/Beckn spec requires the synchronous response to include the
+        # request context so the caller can correlate the ACK with its request.
+        resp_context = {
+            "domain": context.get("domain"),
+            "country": context.get("country"),
+            "city": context.get("city"),
+            "action": context.get("action"),
+            "core_version": context.get("core_version"),
+            "bap_id": context.get("bap_id"),
+            "bap_uri": context.get("bap_uri"),
+            "bpp_id": context.get("bpp_id") or frappe.db.get_single_value("ONDC Settings", "subscriber_id"),
+            "bpp_uri": context.get("bpp_uri") or frappe.db.get_single_value("ONDC Settings", "subscriber_url"),
+            "transaction_id": context.get("transaction_id"),
+            "message_id": context.get("message_id"),
+            "timestamp": context.get("timestamp"),
+            "ttl": context.get("ttl", "PT30S"),
+        }
+
         # --- Step 1: Validate context ---
         is_valid_ctx, err_code, err_msg = validate_context(context)
         if not is_valid_ctx:
             _log_webhook(api, data, status="Failed", error_message=err_msg)
-            frappe.response.update(build_nack_response(err_code, err_msg))
+            nack = build_nack_response(err_code, err_msg)
+            nack["context"] = resp_context
+            frappe.response.update(nack)
             frappe.response["http_status_code"] = 400
             return
 
@@ -59,16 +80,18 @@ def handle_webhook(api):
             settings = frappe.get_single("ONDC Settings")
             if settings.environment == "prod":
                 _log_webhook(api, data, status="Failed", error_message=f"Auth failed: {sig_error}")
-                frappe.response.update(build_nack_response("20001", sig_error))
+                nack = build_nack_response("20001", sig_error)
+                nack["context"] = resp_context
+                frappe.response.update(nack)
                 frappe.response["http_status_code"] = 401
                 return
 
         # --- Step 3: Validate action matches route ---
         if context.get("action") != api:
             _log_webhook(api, data, status="Failed", error_message=f"Action mismatch: {context.get('action')} != {api}")
-            frappe.response.update(
-                build_nack_response("10002", f"Action mismatch: expected {api}, got {context.get('action')}")
-            )
+            nack = build_nack_response("10002", f"Action mismatch: expected {api}, got {context.get('action')}")
+            nack["context"] = resp_context
+            frappe.response.update(nack)
             frappe.response["http_status_code"] = 400
             return
         
@@ -101,7 +124,9 @@ def handle_webhook(api):
         handler_method = handler_map.get(api)
         if not handler_method:
             _update_webhook_log(log_name, status="Failed", error_message=f"Unknown action: {api}")
-            frappe.response.update(build_nack_response("10002", f"Unknown action: {api}"))
+            nack = build_nack_response("10002", f"Unknown action: {api}")
+            nack["context"] = resp_context
+            frappe.response.update(nack)
             frappe.response["http_status_code"] = 400
             return
 
@@ -114,9 +139,9 @@ def handle_webhook(api):
         )
 
         frappe.db.commit()
-        # Set ACK directly in frappe.response so Frappe's handler serializes it properly.
-        # Previously returned a werkzeug Response object which Frappe could not serialize,
-        # causing Pramaan to receive {} instead of {"message": {"ack": {"status": "ACK"}}}.
+        # Include context in the ACK so Pramaan can correlate the response.
+        # ONDC/Beckn spec requires context to be echoed back in the synchronous ACK.
+        ack_response["context"] = resp_context
         frappe.response.update(ack_response)
         return
 
