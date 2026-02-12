@@ -616,13 +616,117 @@ class ONDCClient:
     # -----------------------------------------------------------------------
     def add_payment_terms(self, order):
         """
-        Add payment terms to order during /init flow.
-        Includes payment method, collector info, and settlement details.
+        Build the complete on_init response.
+        ONDC spec requires: provider, items (with prices), billing,
+        fulfillments (with delivery details), payment terms, and quote.
+        If items are empty in the init request (BAP relies on BPP state),
+        we re-resolve them from the select-phase items or the product DB.
         """
-        # Build payment object
+        # ----- 1. Provider -----
+        order["provider"] = {
+            "id": self.settings.subscriber_id,
+            "locations": [{"id": f"LOC-{self.settings.city}"}],
+        }
+
+        # ----- 2. Resolve items & build quote -----
+        items_in = order.get("items", [])
+        resolved_items = []
+        quote_breakup = []
+        item_total = 0.0
+
+        for item in items_in:
+            item_id = item.get("id")
+            quantity = int(item.get("quantity", {}).get("count", 1))
+            product = None
+            try:
+                product = frappe.get_doc("ONDC Product", {"ondc_product_id": item_id})
+            except frappe.DoesNotExistError:
+                pass
+            if not product:
+                continue
+
+            price = float(product.price or 0)
+            line_total = price * quantity
+
+            resolved_items.append({
+                "id": item_id,
+                "fulfillment_id": "F1",
+                "quantity": {"count": quantity},
+                "price": {"currency": "INR", "value": str(price)},
+            })
+            quote_breakup.append({
+                "title": product.product_name or item_id,
+                "@ondc/org/item_id": item_id,
+                "@ondc/org/item_quantity": {"count": quantity},
+                "@ondc/org/title_type": "item",
+                "price": {"currency": "INR", "value": str(line_total)},
+            })
+            item_total += line_total
+
+        # Delivery charges
+        delivery_charge = float(self.settings.get("default_delivery_charge") or 0)
+        if delivery_charge > 0:
+            quote_breakup.append({
+                "title": "Delivery charges",
+                "@ondc/org/item_id": "F1",
+                "@ondc/org/title_type": "delivery",
+                "price": {"currency": "INR", "value": str(delivery_charge)},
+            })
+
+        # Tax
+        tax_rate = float(self.settings.get("default_tax_rate") or 0)
+        tax_amount = round(item_total * tax_rate / 100, 2) if tax_rate > 0 else 0
+        if tax_amount > 0:
+            quote_breakup.append({
+                "title": "Tax",
+                "@ondc/org/item_id": "F1",
+                "@ondc/org/title_type": "tax",
+                "price": {"currency": "INR", "value": str(tax_amount)},
+            })
+
+        grand_total = item_total + delivery_charge + tax_amount
+
+        if resolved_items:
+            order["items"] = resolved_items
+        order["quote"] = {
+            "price": {"currency": "INR", "value": str(round(grand_total, 2))},
+            "breakup": quote_breakup,
+            "ttl": "PT15M",
+        }
+
+        # ----- 3. Fulfillments -----
+        fulfillments_in = order.get("fulfillments", [])
+        # Carry forward BAP's delivery end-location if provided
+        end_block = {}
+        if fulfillments_in:
+            end_block = fulfillments_in[0].get("end", {})
+
+        default_tat = self.settings.get("default_time_to_ship") or "PT60M"
+        order["fulfillments"] = [
+            {
+                "id": "F1",
+                "type": "Delivery",
+                "@ondc/org/provider_name": self.settings.get("store_name") or self.settings.legal_entity_name,
+                "tracking": False,
+                "@ondc/org/category": "Immediate Delivery",
+                "@ondc/org/TAT": default_tat,
+                "state": {"descriptor": {"code": "Serviceable"}},
+                **({"end": end_block} if end_block else {}),
+            }
+        ]
+
+        # ----- 4. Payment terms -----
+        # Echo the buyer's requested payment type (ON-ORDER, ON-FULFILLMENT)
+        existing_payment = order.get("payment", {})
+        buyer_payment_type = existing_payment.get("type", "ON-ORDER")
+
+        collected_by = "BAP"
+        if buyer_payment_type == "ON-FULFILLMENT":
+            collected_by = "BPP"
+
         payment = {
-            "type": "PRE-FULFILLMENT",
-            "collected_by": "BAP",
+            "type": buyer_payment_type,
+            "collected_by": collected_by,
             "@ondc/org/buyer_app_finder_fee_type": "percent",
             "@ondc/org/buyer_app_finder_fee_amount": str(
                 self.settings.get("buyer_finder_fee") or "3"
@@ -643,23 +747,11 @@ class ONDCClient:
                 }
             ],
         }
-
-        # Check if COD is supported and requested
-        existing_payment = order.get("payment", {})
-        if existing_payment.get("type") == "ON-FULFILLMENT":
-            payment["type"] = "ON-FULFILLMENT"
-            payment["collected_by"] = "BPP"
-
         order["payment"] = payment
 
-        # Add billing info acknowledgment
+        # ----- 5. Billing (keep from request) -----
         if "billing" not in order:
             order["billing"] = {}
-
-        # Add provider details
-        order["provider"] = {
-            "id": self.settings.subscriber_id,
-        }
 
         return order
 
