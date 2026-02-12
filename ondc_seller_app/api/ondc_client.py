@@ -563,15 +563,14 @@ class ONDCClient:
                 "price": {"currency": "INR", "value": str(line_total)},
             })
 
-        # Delivery charges (configurable from settings)
+        # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
         delivery_charge = float(self.settings.get("default_delivery_charge") or 0)
-        if delivery_charge > 0:
-            quote_breakup.append({
-                "title": "Delivery charges",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "delivery",
-                "price": {"currency": "INR", "value": str(delivery_charge)},
-            })
+        quote_breakup.append({
+            "title": "Delivery charges",
+            "@ondc/org/item_id": "F1",
+            "@ondc/org/title_type": "delivery",
+            "price": {"currency": "INR", "value": str(delivery_charge)},
+        })
 
         # Packing charges
         packing_charge = float(self.settings.get("default_packing_charge") or 0)
@@ -671,15 +670,14 @@ class ONDCClient:
             })
             item_total += line_total
 
-        # Delivery charges
+        # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
         delivery_charge = float(self.settings.get("default_delivery_charge") or 0)
-        if delivery_charge > 0:
-            quote_breakup.append({
-                "title": "Delivery charges",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "delivery",
-                "price": {"currency": "INR", "value": str(delivery_charge)},
-            })
+        quote_breakup.append({
+            "title": "Delivery charges",
+            "@ondc/org/item_id": "F1",
+            "@ondc/org/title_type": "delivery",
+            "price": {"currency": "INR", "value": str(delivery_charge)},
+        })
 
         # Tax
         tax_rate = float(self.settings.get("default_tax_rate") or 0)

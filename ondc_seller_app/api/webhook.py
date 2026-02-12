@@ -30,20 +30,24 @@ def handle_webhook(api):
     try:
         data = frappe.request.get_json()
         if not data:
-            return _json_response(build_nack_response("20000", "Empty request body"), 400)
-        
+            frappe.response.update(build_nack_response("20000", "Empty request body"))
+            frappe.response["http_status_code"] = 400
+            return
+
         context = data.get("context", {})
-        
+
         # --- Step 1: Validate context ---
         is_valid_ctx, err_code, err_msg = validate_context(context)
         if not is_valid_ctx:
             _log_webhook(api, data, status="Failed", error_message=err_msg)
-            return _json_response(build_nack_response(err_code, err_msg), 400)
-        
+            frappe.response.update(build_nack_response(err_code, err_msg))
+            frappe.response["http_status_code"] = 400
+            return
+
         # --- Step 2: Verify signature ---
         auth_header = frappe.request.headers.get("Authorization")
         gateway_auth_header = frappe.request.headers.get("X-Gateway-Authorization")
-        
+
         is_valid_sig, sig_error = verify_request(data, auth_header, gateway_auth_header)
         if not is_valid_sig:
             # Frappe v14+: first arg = title (140 char max), use keyword args for safety
@@ -55,15 +59,18 @@ def handle_webhook(api):
             settings = frappe.get_single("ONDC Settings")
             if settings.environment == "prod":
                 _log_webhook(api, data, status="Failed", error_message=f"Auth failed: {sig_error}")
-                return _json_response(build_nack_response("20001", sig_error), 401)
-        
+                frappe.response.update(build_nack_response("20001", sig_error))
+                frappe.response["http_status_code"] = 401
+                return
+
         # --- Step 3: Validate action matches route ---
         if context.get("action") != api:
             _log_webhook(api, data, status="Failed", error_message=f"Action mismatch: {context.get('action')} != {api}")
-            return _json_response(
-                build_nack_response("10002", f"Action mismatch: expected {api}, got {context.get('action')}"),
-                400,
+            frappe.response.update(
+                build_nack_response("10002", f"Action mismatch: expected {api}, got {context.get('action')}")
             )
+            frappe.response["http_status_code"] = 400
+            return
         
         # --- Step 4: Log the webhook ---
         log_name = _log_webhook(api, data, status="Received")
@@ -94,8 +101,10 @@ def handle_webhook(api):
         handler_method = handler_map.get(api)
         if not handler_method:
             _update_webhook_log(log_name, status="Failed", error_message=f"Unknown action: {api}")
-            return _json_response(build_nack_response("10002", f"Unknown action: {api}"), 400)
-        
+            frappe.response.update(build_nack_response("10002", f"Unknown action: {api}"))
+            frappe.response["http_status_code"] = 400
+            return
+
         frappe.enqueue(
             handler_method,
             queue="default",
@@ -103,16 +112,19 @@ def handle_webhook(api):
             data=data,
             log_name=log_name,
         )
-        
+
         frappe.db.commit()
-        return _json_response(ack_response, 200)
-    
+        # Set ACK directly in frappe.response so Frappe's handler serializes it properly.
+        # Previously returned a werkzeug Response object which Frappe could not serialize,
+        # causing Pramaan to receive {} instead of {"message": {"ack": {"status": "ACK"}}}.
+        frappe.response.update(ack_response)
+        return
+
     except Exception as e:
         frappe.log_error(title=f"ONDC Webhook Error - {api}"[:140], message=traceback.format_exc())
-        return _json_response(
-            build_nack_response("20000", str(e)),
-            500,
-        )
+        frappe.response.update(build_nack_response("20000", str(e)))
+        frappe.response["http_status_code"] = 500
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -759,49 +771,49 @@ def process_receiver_recon(data, log_name=None):
 @frappe.whitelist(allow_guest=True)
 def handle_search(**kwargs):
     """Root-level /search endpoint"""
-    return handle_webhook("search")
+    handle_webhook("search")
 
 @frappe.whitelist(allow_guest=True)
 def handle_select(**kwargs):
     """Root-level /select endpoint"""
-    return handle_webhook("select")
+    handle_webhook("select")
 
 @frappe.whitelist(allow_guest=True)
 def handle_init(**kwargs):
     """Root-level /init endpoint"""
-    return handle_webhook("init")
+    handle_webhook("init")
 
 @frappe.whitelist(allow_guest=True)
 def handle_confirm(**kwargs):
     """Root-level /confirm endpoint"""
-    return handle_webhook("confirm")
+    handle_webhook("confirm")
 
 @frappe.whitelist(allow_guest=True)
 def handle_status(**kwargs):
     """Root-level /status endpoint"""
-    return handle_webhook("status")
+    handle_webhook("status")
 
 @frappe.whitelist(allow_guest=True)
 def handle_track(**kwargs):
     """Root-level /track endpoint"""
-    return handle_webhook("track")
+    handle_webhook("track")
 
 @frappe.whitelist(allow_guest=True)
 def handle_cancel(**kwargs):
     """Root-level /cancel endpoint"""
-    return handle_webhook("cancel")
+    handle_webhook("cancel")
 
 @frappe.whitelist(allow_guest=True)
 def handle_update(**kwargs):
     """Root-level /update endpoint"""
-    return handle_webhook("update")
+    handle_webhook("update")
 
 @frappe.whitelist(allow_guest=True)
 def handle_rating(**kwargs):
     """Root-level /rating endpoint"""
-    return handle_webhook("rating")
+    handle_webhook("rating")
 
 @frappe.whitelist(allow_guest=True)
 def handle_support(**kwargs):
     """Root-level /support endpoint"""
-    return handle_webhook("support")
+    handle_webhook("support")
