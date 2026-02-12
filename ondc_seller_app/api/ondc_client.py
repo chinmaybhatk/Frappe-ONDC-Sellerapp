@@ -280,6 +280,10 @@ class ONDCClient:
         order = self.calculate_quote(select_request.get("message", {}).get("order", {}))
 
         payload = {"context": context, "message": {"order": order}}
+        frappe.log_error(
+            title="ONDC on_select payload",
+            message=json.dumps(payload, indent=2, default=str)[:10000]
+        )
         return self.send_callback(
             select_request.get("context", {}).get("bap_uri"), "/on_select", payload
         )
@@ -290,6 +294,10 @@ class ONDCClient:
         order = self.add_payment_terms(init_request.get("message", {}).get("order", {}))
 
         payload = {"context": context, "message": {"order": order}}
+        frappe.log_error(
+            title="ONDC on_init payload",
+            message=json.dumps(payload, indent=2, default=str)[:10000]
+        )
         return self.send_callback(
             init_request.get("context", {}).get("bap_uri"), "/on_init", payload
         )
@@ -727,6 +735,7 @@ class ONDCClient:
         payment = {
             "type": buyer_payment_type,
             "collected_by": collected_by,
+            "status": "NOT-PAID",
             "@ondc/org/buyer_app_finder_fee_type": "percent",
             "@ondc/org/buyer_app_finder_fee_amount": str(
                 self.settings.get("buyer_finder_fee") or "3"
