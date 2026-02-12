@@ -490,7 +490,8 @@ class ONDCClient:
                     "categories": categories,
                     "items": items,
                     "fulfillments": fulfillment_types,
-                    "payments": payment_types,
+                    # NOTE: "payments" is NOT allowed in on_search response per ONDC schema.
+                    # It belongs only in on_select / on_init / on_confirm.
                     "tags": provider_tags,
                     "ttl": "PT24H",
                 }
