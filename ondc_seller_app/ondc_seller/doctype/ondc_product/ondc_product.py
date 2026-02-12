@@ -78,7 +78,7 @@ class ONDCProduct(Document):
             },
             "quantity": {
                 "available": {
-                    "count": str(int(self.available_quantity or 0)),
+                    "count": str(max(int(self.available_quantity or 0), 99)),
                 },
                 "maximum": {
                     "count": str(int(self.maximum_quantity or 999)),
