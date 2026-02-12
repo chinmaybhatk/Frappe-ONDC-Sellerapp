@@ -14,6 +14,111 @@ A comprehensive Frappe application for sellers to integrate with the Open Networ
 
 ---
 
+## Basic Workflow — How the Seller App Works
+
+The ONDC Seller App acts as a **BPP (Buyer-Platform Provider)** — it receives requests from Buyer Apps (like Paytm, PhonePe, ONDC reference app) through the ONDC Gateway and responds with your catalog, pricing, and order fulfillment.
+
+### Happy Path: From Search to Delivery
+
+```
+Buyer App (BAP)          ONDC Gateway          Your Seller App (BPP)
+     │                       │                        │
+     │── search ────────────►│── search ─────────────►│
+     │                       │◄── on_search (catalog) ─│  ← Returns your products
+     │◄── on_search ─────────│                        │
+     │                       │                        │
+     │── select ────────────►│── select ─────────────►│
+     │                       │◄── on_select (quote) ──│  ← Returns price breakup
+     │◄── on_select ─────────│                        │
+     │                       │                        │
+     │── init ──────────────►│── init ───────────────►│
+     │                       │◄── on_init (payment) ──│  ← Returns payment & billing
+     │◄── on_init ───────────│                        │
+     │                       │                        │
+     │── confirm ───────────►│── confirm ────────────►│
+     │                       │◄── on_confirm (order) ─│  ← Order created! Returns order ID
+     │◄── on_confirm ────────│                        │
+     │                       │                        │
+     │── status ────────────►│── status ─────────────►│
+     │                       │◄── on_status ──────────│  ← Returns fulfillment status
+     │◄── on_status ─────────│                        │
+```
+
+### Step-by-Step Breakdown
+
+| Step | API | What Happens | Your App Does |
+|------|-----|-------------|---------------|
+| 1 | **search** → **on_search** | Buyer searches for "milk" | Returns matching ONDC Products from your catalog with prices, images, availability |
+| 2 | **select** → **on_select** | Buyer selects items and qty | Calculates quote breakup (item price + taxes + delivery charges) |
+| 3 | **init** → **on_init** | Buyer provides delivery address | Returns payment details, fulfillment info, billing, and terms |
+| 4 | **confirm** → **on_confirm** | Buyer confirms & pays | Creates ONDC Order in Frappe, triggers fulfillment workflow |
+| 5 | **status** → **on_status** | Buyer checks order status | Returns current fulfillment state from ONDC Order |
+| 6 | **track** → **on_track** | Buyer wants tracking link | Returns tracking URL if available |
+| 7 | **cancel** → **on_cancel** | Buyer/Seller cancels order | Updates ONDC Order status, processes refund if applicable |
+| 8 | **update** → **on_update** | Seller updates fulfillment | Sends delivery status updates (Packed → Out for Delivery → Delivered) |
+
+### Order Fulfillment Lifecycle
+
+Once an order is confirmed, the seller manages fulfillment through the ONDC Order DocType:
+
+```
+Pending → Packed → Agent Assigned → Out for Delivery → Delivered
+                                                         │
+                                              (or) Cancelled / RTO
+```
+
+Each status change triggers an **unsolicited `on_status`** callback to the buyer app.
+
+### Post-Order Flows
+
+| Flow | APIs | Purpose |
+|------|------|---------|
+| **IGM** (Issue & Grievance) | `issue` → `on_issue`, `issue_status` → `on_issue_status` | Buyer raises complaints; mapped to Frappe Helpdesk tickets |
+| **RSP** (Settlement) | `receiver_recon` → `on_receiver_recon` | ONDC sends settlement details; reconciled with ERPNext payments |
+| **Rating** | `rating` → `on_rating` | Buyer rates the seller experience |
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Frappe Cloud / Bench                │
+│                                                     │
+│  ┌──────────────┐    ┌───────────────────────────┐  │
+│  │  middleware.py│───►│  webhook.py               │  │
+│  │  (routing)   │    │  (auth + dispatch)         │  │
+│  └──────────────┘    └───────────┬───────────────┘  │
+│                                  │                  │
+│          ┌───────────────────────┼──────────┐       │
+│          ▼                       ▼          ▼       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────┐  │
+│  │ ondc_client.py│  │  auth.py     │  │ tasks.py │  │
+│  │ (callbacks)  │  │  (Ed25519)   │  │ (sync)   │  │
+│  └──────┬───────┘  └──────────────┘  └──────────┘  │
+│         │                                           │
+│         ▼                                           │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  DocTypes: ONDC Settings │ ONDC Product │     │   │
+│  │           ONDC Order │ ONDC Webhook Log      │   │
+│  └──────────────────────────────────────────────┘   │
+│         │                                           │
+│         ▼                                           │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  ERPNext: Items │ Sales Orders │ Payments    │   │
+│  │  Helpdesk: HD Tickets (IGM)                  │   │
+│  └──────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+```
+
+### How Routing Works
+
+1. ONDC Gateway sends POST requests to your subscriber URL (e.g., `https://your-site.frappe.cloud/search`)
+2. **`middleware.py`** intercepts the request via Frappe's `before_request` hook
+3. It maps the path (`/search`) to the correct handler (`ondc_seller_app.api.webhook.handle_search`) using `frappe.local.form_dict.cmd`
+4. **`webhook.py`** verifies the Ed25519 signature, then dispatches to the appropriate handler
+5. The handler processes the request and **`ondc_client.py`** sends the async callback (e.g., `on_search`) to the buyer app
+
+---
+
 ## Installation
 
 ### Prerequisites
