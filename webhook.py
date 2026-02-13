@@ -295,17 +295,44 @@ def process_confirm(data, log_name=None):
         result = client.on_confirm(data)
         _update_webhook_log(log_name, status="Processed", response=result)
 
-        # Enqueue auto-progress fulfillment states (FIX 5)
-        # This progresses: Pending → Packed → Agent-assigned → Order-picked-up → Out-for-delivery → Order-delivered
+        # Send 2 unsolicited on_status callbacks: Packed, then Agent-assigned.
+        # Remaining states (Order-picked-up, Out-for-delivery, Order-delivered)
+        # will be auto-advanced by process_status() when Pramaan calls /status.
+        def _build_unsolicited_status_data(ctx):
+            """Build a status data dict with fresh message_id for unsolicited callback."""
+            return {
+                "context": {
+                    "domain": ctx.get("domain", "ONDC:RET10"),
+                    "country": ctx.get("country", "IND"),
+                    "city": ctx.get("city", settings.city),
+                    "action": "on_status",
+                    "core_version": ctx.get("core_version", "1.2.0"),
+                    "bap_id": ctx.get("bap_id"),
+                    "bap_uri": ctx.get("bap_uri"),
+                    "bpp_id": settings.subscriber_id,
+                    "bpp_uri": settings.subscriber_url,
+                    "transaction_id": ctx.get("transaction_id"),
+                    "message_id": str(uuid.uuid4()),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "ttl": "PT30S",
+                },
+                "message": {"order_id": order.ondc_order_id},
+            }
+
+        # 1st unsolicited: Pending → Packed (process_status auto-advances)
         frappe.enqueue(
-            "ondc_seller_app.api.webhook.auto_progress_fulfillment",
-            queue="long",
-            timeout=300,
-            order_id=order.ondc_order_id,
-            transaction_id=context.get("transaction_id"),
-            bap_uri=context.get("bap_uri"),
-            bap_id=context.get("bap_id"),
-            context_data=context,
+            "ondc_seller_app.api.webhook.process_status",
+            queue="short",
+            timeout=60,
+            data=_build_unsolicited_status_data(context),
+        )
+        # 2nd unsolicited: Packed → Agent-assigned (process_status auto-advances again)
+        frappe.enqueue(
+            "ondc_seller_app.api.webhook.process_status",
+            queue="short",
+            timeout=60,
+            data=_build_unsolicited_status_data(context),
+            at_front=False,
         )
 
     except Exception as e:
@@ -347,6 +374,31 @@ def process_status(data, log_name=None):
 
         # Build fulfillment with granular state
         fulfillment_state = order.get("fulfillment_state") or "Pending"
+
+        # --- Auto-advance fulfillment state on each status request ---
+        # Pramaan expects the state to progress each time it calls /status.
+        # Unsolicited callbacks handle: Pending→Packed, Packed→Agent-assigned
+        # Solicited (Pramaan) requests handle the rest via this auto-advance.
+        STATE_PROGRESSION = [
+            "Pending", "Packed", "Agent-assigned",
+            "Order-picked-up", "Out-for-delivery", "Order-delivered"
+        ]
+        if fulfillment_state in STATE_PROGRESSION:
+            idx = STATE_PROGRESSION.index(fulfillment_state)
+            if idx < len(STATE_PROGRESSION) - 1:
+                new_state = STATE_PROGRESSION[idx + 1]
+                order.fulfillment_state = new_state
+                order.save(ignore_permissions=True)
+                frappe.db.commit()
+                fulfillment_state = new_state
+
+        # For Order-delivered, mark order as Completed
+        if fulfillment_state == "Order-delivered":
+            if order.order_status != "Completed":
+                order.order_status = "Completed"
+                order.save(ignore_permissions=True)
+                frappe.db.commit()
+
         now_iso = datetime.utcnow().isoformat() + "Z"
 
         # Store/pickup location from settings

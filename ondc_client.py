@@ -492,7 +492,7 @@ class ONDCClient:
                                 "timestamp": datetime.utcnow().isoformat() + "Z",
                                 "days": "1,2,3,4,5,6,7",
                                 "schedule": {
-                                    "holidays": ["2026-01-26"],
+                                    "holidays": ["2026-01-26", "2026-08-15", "2026-10-02"],
                                     "frequency": "PT4H",
                                     "times": [f"{operating_start}", f"{operating_end}"],
                                 },
