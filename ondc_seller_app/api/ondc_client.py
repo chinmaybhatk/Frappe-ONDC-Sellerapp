@@ -9,6 +9,19 @@ from datetime import datetime, timedelta
 import hashlib
 
 
+def _format_gps(gps_str):
+    """Ensure GPS coordinates have minimum 6 decimal places for ONDC compliance."""
+    try:
+        parts = (gps_str or "0.0,0.0").split(",")
+        if len(parts) == 2:
+            lat = f"{float(parts[0].strip()):.6f}"
+            lon = f"{float(parts[1].strip()):.6f}"
+            return f"{lat},{lon}"
+    except (ValueError, TypeError):
+        pass
+    return "0.000000,0.000000"
+
+
 class ONDCClient:
     def __init__(self, settings):
         self.settings = settings
@@ -374,7 +387,7 @@ class ONDCClient:
         ]
 
         # Store location from settings (no more hardcoded GPS)
-        store_gps = self.settings.get("store_gps") or "0.0,0.0"
+        store_gps = _format_gps(self.settings.get("store_gps") or "0.0,0.0")
         store_locality = self.settings.get("store_locality") or ""
         store_city = self.settings.get("store_city_name") or self.settings.city
         store_state = self.settings.get("store_state") or ""
@@ -456,6 +469,16 @@ class ONDCClient:
                 "long_desc": store_long_desc,
                 "symbol": store_logo,
                 "images": store_images,
+                "tags": [
+                    {
+                        "code": "bpp_terms",
+                        "list": [
+                            {"code": "np_type", "value": self.settings.get("np_type") or "MSN"},
+                            {"code": "accept_bap_terms", "value": "Y"},
+                            {"code": "collect_payment", "value": "Y"},
+                        ],
+                    }
+                ],
             },
             "bpp/fulfillments": fulfillment_types,
             "bpp/providers": [
@@ -468,11 +491,16 @@ class ONDCClient:
                         "symbol": store_logo,
                         "images": store_images,
                     },
+                    "time": {
+                        "label": "enable",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    },
                     "locations": [
                         {
                             "id": location_id,
                             "gps": store_gps,
                             "address": {
+                                "street": self.settings.get("store_street") or store_locality,
                                 "locality": store_locality,
                                 "city": store_city,
                                 "state": store_state,
@@ -489,15 +517,25 @@ class ONDCClient:
                                     "times": [f"{operating_start}", f"{operating_end}"],
                                 },
                                 "range": {
-                                    "start": operating_start,
-                                    "end": operating_end,
+                                    "start": f"{datetime.utcnow().strftime('%Y-%m-%d')}T{operating_start}:00.000Z",
+                                    "end": f"{datetime.utcnow().strftime('%Y-%m-%d')}T{operating_end}:00.000Z",
                                 },
                             },
                         }
                     ],
                     "categories": categories,
                     "items": items,
-                    "fulfillments": fulfillment_types,
+                    "fulfillments": [
+                        {
+                            "id": ft["id"],
+                            "type": ft["type"],
+                            "contact": {
+                                "phone": self.settings.get("consumer_care_phone") or "9999999999",
+                                "email": self.settings.get("consumer_care_email") or "support@example.com",
+                            },
+                        }
+                        for ft in fulfillment_types
+                    ],
                     # NOTE: "payments" is NOT allowed in on_search response per ONDC schema.
                     # It belongs only in on_select / on_init / on_confirm.
                     "tags": provider_tags,
@@ -559,6 +597,13 @@ class ONDCClient:
                 "@ondc/org/item_quantity": {"count": actual_qty},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "quantity": {
+                        "available": {"count": str(max(int(product.available_quantity or 0), 99))},
+                        "maximum": {"count": str(int(product.maximum_quantity or 999))},
+                    },
+                    "price": {"currency": "INR", "value": str(price)},
+                },
             })
 
         # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
@@ -665,6 +710,13 @@ class ONDCClient:
                 "@ondc/org/item_quantity": {"count": quantity},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "quantity": {
+                        "available": {"count": str(max(int(product.available_quantity or 0), 99))},
+                        "maximum": {"count": str(int(product.maximum_quantity or 999))},
+                    },
+                    "price": {"currency": "INR", "value": str(price)},
+                },
             })
             item_total += line_total
 
@@ -706,7 +758,7 @@ class ONDCClient:
             end_block = fulfillments_in[0].get("end", {})
 
         default_tat = self.settings.get("default_time_to_ship") or "PT60M"
-        store_gps = self.settings.get("store_gps") or "12.9716,77.5946"
+        store_gps = _format_gps(self.settings.get("store_gps") or "12.9716,77.5946")
         store_locality = self.settings.get("store_locality") or ""
         store_city = self.settings.get("store_city_name") or self.settings.city or ""
         store_state = self.settings.get("store_state") or ""
@@ -728,6 +780,7 @@ class ONDCClient:
                     "descriptor": {"name": store_name},
                     "gps": store_gps,
                     "address": {
+                        "street": self.settings.get("store_street") or store_locality,
                         "locality": store_locality,
                         "city": store_city,
                         "state": store_state,
@@ -798,6 +851,20 @@ class ONDCClient:
             }
         ]
 
+        # Cancellation terms (ONDC RET10 requirement for on_init)
+        order["cancellation_terms"] = [
+            {
+                "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                "reason_required": False,
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                "reason_required": True,
+                "cancellation_fee": {"percentage": "100", "amount": {"currency": "INR", "value": "0"}},
+            },
+        ]
+
         return order
 
     # -----------------------------------------------------------------------
@@ -809,11 +876,14 @@ class ONDCClient:
         Sets order state, generates order ID, includes fulfillment with
         start/end locations, payment details, and bpp_terms tags.
         """
+        from datetime import timedelta
+
         order_id = order_data.get("id") or frappe.generate_hash(length=16)
-        now_iso = datetime.utcnow().isoformat() + "Z"
+        now = datetime.utcnow()
+        now_iso = now.isoformat() + "Z"
 
         # Build fulfillment start (pickup) location from settings
-        store_gps = self.settings.get("store_gps") or "12.9716,77.5946"
+        store_gps = _format_gps(self.settings.get("store_gps") or "12.9716,77.5946")
         store_name = self.settings.get("store_name") or self.settings.legal_entity_name or "Store"
         store_locality = self.settings.get("store_locality") or ""
         store_city = self.settings.get("store_city_name") or self.settings.city or ""
@@ -839,6 +909,7 @@ class ONDCClient:
                         "descriptor": {"name": store_name},
                         "gps": store_gps,
                         "address": {
+                            "street": self.settings.get("store_street") or store_locality,
                             "locality": store_locality,
                             "city": store_city,
                             "state": store_state,
@@ -859,8 +930,19 @@ class ONDCClient:
                 },
             }
             # Carry forward end (delivery) location from confirm request
+            # and add time.range for delivery window (FIX 4B)
             if "end" in ful:
                 confirmed_ful["end"] = ful["end"]
+                # Add delivery time range if not present
+                if "time" not in confirmed_ful["end"]:
+                    delivery_start = now + timedelta(hours=1)
+                    delivery_end = now + timedelta(hours=2)
+                    confirmed_ful["end"]["time"] = {
+                        "range": {
+                            "start": delivery_start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                            "end": delivery_end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        }
+                    }
             confirmed_fulfillments.append(confirmed_ful)
 
         if not confirmed_fulfillments:
@@ -879,6 +961,31 @@ class ONDCClient:
         bpp_tax_number = self.settings.get("gst_number") or self.settings.get("tax_number") or "00AABCU9603R1ZM"
         provider_tax_number = self.settings.get("provider_gst_number") or bpp_tax_number
 
+        # FIX 4D: Enrich quote breakup entries with item object
+        quote = order_data.get("quote", {})
+        enriched_breakup = []
+        for entry in quote.get("breakup", []):
+            if entry.get("@ondc/org/title_type") == "item":
+                if "item" not in entry:
+                    item_price = entry.get("price", {})
+                    entry["item"] = {
+                        "quantity": {
+                            "available": {"count": "99"},
+                            "maximum": {"count": "999"},
+                        },
+                        "price": {
+                            "currency": item_price.get("currency", "INR"),
+                            "value": item_price.get("value", "0"),
+                        },
+                    }
+            enriched_breakup.append(entry)
+        if enriched_breakup:
+            quote["breakup"] = enriched_breakup
+
+        # FIX 4E: Echo created_at/updated_at from confirm request
+        created_at = order_data.get("created_at") or now_iso
+        updated_at = order_data.get("created_at") or now_iso
+
         confirmed_order = {
             "id": order_id,
             "state": "Accepted",
@@ -886,7 +993,7 @@ class ONDCClient:
             "items": order_data.get("items", []),
             "billing": order_data.get("billing", {}),
             "fulfillments": confirmed_fulfillments,
-            "quote": order_data.get("quote", {}),
+            "quote": quote,
             "payment": payment_in,
             "tags": [
                 {
@@ -898,8 +1005,21 @@ class ONDCClient:
                     ],
                 }
             ],
-            "created_at": now_iso,
-            "updated_at": now_iso,
+            # FIX 4C: Add cancellation_terms (required by ONDC RET10)
+            "cancellation_terms": [
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                    "reason_required": False,
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                },
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                    "reason_required": True,
+                    "cancellation_fee": {"percentage": "100", "amount": {"currency": "INR", "value": "0"}},
+                },
+            ],
+            "created_at": created_at,
+            "updated_at": updated_at,
         }
 
         return confirmed_order

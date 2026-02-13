@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
 import json
+from datetime import datetime
 
 
 class ONDCProduct(Document):
@@ -62,7 +63,7 @@ class ONDCProduct(Document):
             "id": self.ondc_product_id,
             "descriptor": {
                 "name": self.product_name or "",
-                "code": self.ondc_product_id,
+                "code": f"1:{self.ondc_product_id}",
                 "short_desc": self.short_desc or "",
                 "long_desc": self.long_desc or "",
                 "symbol": images[0] if images else "",
@@ -117,6 +118,10 @@ class ONDCProduct(Document):
                     ],
                 },
             ],
+            "time": {
+                "label": "enable",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            },
         }
 
         # Add statutory requirements for packaged commodities (if any field is set)

@@ -3,6 +3,7 @@ import json
 from frappe import _
 from werkzeug.wrappers import Response
 import traceback
+from datetime import datetime
 
 from ondc_seller_app.api.auth import verify_request, validate_context
 from ondc_seller_app.api.ondc_errors import (
@@ -267,55 +268,116 @@ def process_confirm(data, log_name=None):
         client = ONDCClient(settings)
         result = client.on_confirm(data)
         _update_webhook_log(log_name, status="Processed", response=result)
-    
+
+        # Auto-progress fulfillment states for Pramaan testing
+        frappe.enqueue(
+            "ondc_seller_app.api.webhook.auto_progress_fulfillment",
+            order_id=order_data.get("id") or order.ondc_order_id,
+            transaction_id=context.get("transaction_id"),
+            bap_uri=context.get("bap_uri"),
+            bap_id=context.get("bap_id"),
+            context_data=data.get("context"),
+            queue="long",
+        )
+
     except Exception as e:
         frappe.log_error(traceback.format_exc(), "ONDC process_confirm Error")
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
 
 
 def process_status(data, log_name=None):
-    """Process status request and send on_status callback with granular fulfillment states"""
+    """Process status request and send on_status callback with full ONDC-compliant order object"""
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
-        
+
         order_id = data.get("message", {}).get("order_id")
         if not order_id:
             _update_webhook_log(log_name, status="Failed", error_message="Missing order_id")
             return
-        
+
         try:
             order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
         except frappe.DoesNotExistError:
             _update_webhook_log(log_name, status="Failed", error_message=f"Order not found: {order_id}")
             return
-        
+
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
-        
-        # Build items list
+
+        store_gps = _format_gps(settings.get("store_gps"))
+        store_name = settings.get("store_name") or settings.legal_entity_name or "Store"
+        location_id = f"LOC-{settings.city}"
+
+        payment_type_map = {
+            "Prepaid": "ON-ORDER",
+            "COD": "ON-FULFILLMENT",
+            "Credit": "POST-FULFILLMENT",
+        }
+        ondc_payment_type = payment_type_map.get(order.payment_type, "ON-ORDER")
+
+        # Build items and quote breakup
         items = []
+        quote_breakup = []
+        item_total = 0.0
         for item in order.items:
+            price = float(item.price or 0)
+            qty = int(item.quantity or 1)
+            line_total = price * qty
+            item_total += line_total
             items.append({
                 "id": item.ondc_item_id,
-                "fulfillment_id": order.fulfillment_id,
-                "quantity": {"count": int(item.quantity)},
-                "price": {"currency": "INR", "value": str(item.price)},
+                "fulfillment_id": order.fulfillment_id or "F1",
+                "quantity": {"count": qty},
             })
-        
-        # Build fulfillment with granular state
+            quote_breakup.append({
+                "title": item.item_name or item.ondc_item_id,
+                "@ondc/org/item_id": item.ondc_item_id,
+                "@ondc/org/item_quantity": {"count": qty},
+                "@ondc/org/title_type": "item",
+                "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "quantity": {
+                        "available": {"count": "99"},
+                        "maximum": {"count": "999"},
+                    },
+                    "price": {"currency": "INR", "value": str(price)},
+                },
+            })
+
+        delivery_charge = float(settings.get("default_delivery_charge") or 0)
+        quote_breakup.append({
+            "title": "Delivery charges",
+            "@ondc/org/item_id": order.fulfillment_id or "F1",
+            "@ondc/org/title_type": "delivery",
+            "price": {"currency": "INR", "value": str(delivery_charge)},
+        })
+
+        grand_total = float(order.total_amount or item_total + delivery_charge)
+
         fulfillment_state = order.get("fulfillment_state") or "Pending"
-        
+
+        order_state = "In-progress"
+        if fulfillment_state in ("Order-delivered", "Completed"):
+            order_state = "Completed"
+        elif fulfillment_state == "Cancelled":
+            order_state = "Cancelled"
+
+        now_iso = datetime.utcnow().isoformat() + "Z"
+
         order_payload = {
             "id": order.ondc_order_id,
-            "state": order.order_status,
+            "state": order_state,
             "provider": {
                 "id": settings.subscriber_id,
+                "locations": [{"id": location_id}],
             },
             "items": items,
             "billing": {
                 "name": order.billing_name or order.customer_name,
                 "address": {
+                    "name": order.billing_name or order.customer_name or "",
                     "building": order.billing_building or "",
+                    "street": order.billing_locality or "",
                     "locality": order.billing_locality or "",
                     "city": order.billing_city or "",
                     "state": order.billing_state or "",
@@ -324,47 +386,153 @@ def process_status(data, log_name=None):
                 },
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
+                "created_at": order.creation.isoformat() + "Z" if order.creation else now_iso,
+                "updated_at": now_iso,
             },
             "fulfillments": [
                 {
-                    "id": order.fulfillment_id,
+                    "id": order.fulfillment_id or "F1",
                     "type": order.fulfillment_type or "Delivery",
-                    "state": {
-                        "descriptor": {
-                            "code": fulfillment_state,
-                        }
-                    },
+                    "@ondc/org/provider_name": store_name,
+                    "@ondc/org/TAT": settings.get("default_time_to_ship") or "PT60M",
+                    "state": {"descriptor": {"code": fulfillment_state}},
                     "tracking": bool(order.get("tracking_url")),
+                    "start": {
+                        "location": {
+                            "id": location_id,
+                            "descriptor": {"name": store_name},
+                            "gps": store_gps,
+                            "address": {
+                                "street": settings.get("store_street") or settings.get("store_locality") or "",
+                                "locality": settings.get("store_locality") or "",
+                                "city": settings.get("store_city_name") or settings.city,
+                                "state": settings.get("store_state") or "",
+                                "country": "IND",
+                                "area_code": settings.get("store_area_code") or settings.city,
+                            },
+                        },
+                        "time": {
+                            "range": {
+                                "start": order.creation.isoformat() + "Z" if order.creation else now_iso,
+                                "end": now_iso,
+                            },
+                            "timestamp": now_iso,
+                        },
+                        "contact": {
+                            "phone": settings.get("consumer_care_phone") or "",
+                            "email": settings.get("consumer_care_email") or "",
+                        },
+                    },
+                    "end": {
+                        "location": {
+                            "gps": _format_gps(order.get("delivery_gps") or order.get("shipping_gps") or "0.000000,0.000000"),
+                            "address": {
+                                "name": order.customer_name or "",
+                                "building": order.get("delivery_building") or order.billing_building or "",
+                                "street": order.get("delivery_locality") or order.billing_locality or "",
+                                "locality": order.get("delivery_locality") or order.billing_locality or "",
+                                "city": order.get("delivery_city") or order.billing_city or "",
+                                "state": order.get("delivery_state") or order.billing_state or "",
+                                "country": "IND",
+                                "area_code": order.get("delivery_area_code") or order.billing_area_code or "",
+                            },
+                        },
+                        "time": {
+                            "range": {
+                                "start": now_iso,
+                                "end": now_iso,
+                            },
+                        },
+                        "contact": {
+                            "phone": order.customer_phone or "",
+                            "email": order.customer_email or "",
+                        },
+                    },
                 }
             ],
-            "payment": {
-                "type": order.payment_type or "PRE-FULFILLMENT",
-                "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
+            "quote": {
+                "price": {"currency": "INR", "value": str(grand_total)},
+                "breakup": quote_breakup,
+                "ttl": "PT15M",
             },
+            "payment": {
+                "type": ondc_payment_type,
+                "collected_by": "BAP",
+                "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
+                "@ondc/org/settlement_details": [
+                    {
+                        "settlement_counterparty": "seller-app",
+                        "settlement_type": "neft",
+                        "settlement_bank_account_no": settings.get("settlement_bank_account_no") or "0000000000000",
+                        "settlement_ifsc_code": settings.get("settlement_ifsc_code") or "PLACEHOLDER",
+                        "bank_name": settings.get("settlement_bank_name") or "Bank",
+                        "branch_name": settings.get("settlement_branch_name") or "Branch",
+                    }
+                ],
+            },
+            "created_at": order.creation.isoformat() + "Z" if order.creation else now_iso,
+            "updated_at": now_iso,
+            "tags": [
+                {
+                    "code": "bpp_terms",
+                    "list": [
+                        {"code": "tax_number", "value": settings.get("gst_number") or settings.get("tax_number") or "00AABCU9603R1ZM"},
+                        {"code": "provider_tax_number", "value": settings.get("provider_gst_number") or settings.get("gst_number") or "00AABCU9603R1ZM"},
+                        {"code": "np_type", "value": settings.get("np_type") or "MSN"},
+                    ],
+                }
+            ],
         }
-        
-        # Add tracking URL if available
-        if order.get("tracking_url"):
-            order_payload["fulfillments"][0]["tracking"] = True
-            order_payload["fulfillments"][0]["@ondc/org/tracking_url"] = order.tracking_url
-        
-        # Build context and send callback
+
         context = client.create_context("on_status", data.get("context"))
         payload = {
             "context": context,
             "message": {"order": order_payload},
         }
-        
+
         result = client.send_callback(
             data.get("context", {}).get("bap_uri"),
             "/on_status",
             payload,
         )
         _update_webhook_log(log_name, status="Processed", response=result)
-    
+
     except Exception as e:
         frappe.log_error(traceback.format_exc(), "ONDC process_status Error")
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
+
+
+def auto_progress_fulfillment(order_id, transaction_id, bap_uri, bap_id, context_data):
+    """
+    Auto-progress order through fulfillment states for Pramaan testing.
+    Called after successful on_confirm via frappe.enqueue.
+    """
+    import time
+
+    states = ["Packed", "Agent-assigned", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
+
+    for state in states:
+        time.sleep(2)
+        try:
+            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
+            order.fulfillment_state = state
+            if state == "Order-delivered":
+                order.order_status = "Completed"
+            order.save(ignore_permissions=True)
+            frappe.db.commit()
+
+            # Send unsolicited on_status for each state transition
+            status_data = {
+                "context": context_data,
+                "message": {"order_id": order_id},
+            }
+            process_status(status_data)
+
+        except Exception as e:
+            frappe.log_error(
+                message=f"Auto-progress error for {order_id} state {state}: {str(e)}",
+                title="ONDC Auto Progress",
+            )
 
 
 def process_track(data, log_name=None):
@@ -667,6 +835,20 @@ def process_support(data, log_name=None):
 # ---------------------------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------------------------
+
+
+def _format_gps(gps_str):
+    """Ensure GPS coordinates have minimum 6 decimal places for ONDC compliance."""
+    try:
+        parts = (gps_str or "0.0,0.0").split(",")
+        if len(parts) == 2:
+            lat = f"{float(parts[0].strip()):.6f}"
+            lon = f"{float(parts[1].strip()):.6f}"
+            return f"{lat},{lon}"
+    except (ValueError, TypeError):
+        pass
+    return "0.000000,0.000000"
+
 
 def get_item_code_from_ondc_id(ondc_id):
     """Get Frappe Item code from ONDC product ID"""
