@@ -51,9 +51,12 @@ class ONDCClient:
         if len(raw_key) == 64:
             # Full Ed25519 key (seed + public key) — take only the 32-byte seed
             raw_key = raw_key[:32]
+        elif len(raw_key) == 48:
+            # Some ONDC portal key formats produce 48-byte keys; extract 32-byte seed
+            raw_key = raw_key[:32]
         elif len(raw_key) != 32:
             frappe.throw(
-                f"Invalid signing private key: expected 32 or 64 bytes, got {len(raw_key)}. "
+                f"Invalid signing private key: expected 32, 48, or 64 bytes, got {len(raw_key)}. "
                 "Please regenerate key pairs."
             )
 
@@ -679,6 +682,16 @@ class ONDCClient:
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
+        # Packing charges (must match on_select quote for Pramaan consistency)
+        packing_charge = float(self.settings.get("default_packing_charge") or 0)
+        if packing_charge > 0:
+            quote_breakup.append({
+                "title": "Packing charges",
+                "@ondc/org/item_id": "F1",
+                "@ondc/org/title_type": "packing",
+                "price": {"currency": "INR", "value": str(packing_charge)},
+            })
+
         # Tax
         tax_rate = float(self.settings.get("default_tax_rate") or 0)
         tax_amount = round(item_total * tax_rate / 100, 2) if tax_rate > 0 else 0
@@ -690,7 +703,7 @@ class ONDCClient:
                 "price": {"currency": "INR", "value": str(tax_amount)},
             })
 
-        grand_total = item_total + delivery_charge + tax_amount
+        grand_total = item_total + delivery_charge + packing_charge + tax_amount
 
         if resolved_items:
             order["items"] = resolved_items
