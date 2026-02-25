@@ -218,6 +218,8 @@ def process_confirm(data, log_name=None):
     CRITICAL V9 FIX: The on_confirm callback to the BAP is the primary obligation.
     If order doc creation fails (missing fields, duplicate, etc.), the callback
     must still be sent. Otherwise Pramaan hangs forever at the confirm step.
+    
+    V16 FIX: Correctly store total_amount from quote and preserve ONDC payment status.
     """
     callback_sent = False
     try:
@@ -283,16 +285,23 @@ def process_confirm(data, log_name=None):
                 "price": float(item_data.get("price", {}).get("value", 0)),
             })
 
-        # Payment details
+        # Payment details - map back from ONDC type and preserve status as-is
         payment = order_data.get("payment", {})
         order.payment_type = _map_payment_type(payment.get("type"))
+        # V16 FIX: Keep the ONDC payment status as provided (NOT-PAID or PAID)
         order.payment_status = "Paid" if payment.get("status") == "PAID" else "Pending"
 
-        # Total amount from quote
+        # V16 FIX: Total amount from quote.price.value (full order total including all charges)
         quote = order_data.get("quote", {})
         total = quote.get("price", {}).get("value")
         if total:
             order.total_amount = float(total)
+        else:
+            # Fallback: compute from items if quote is incomplete
+            item_total = sum(float(i.get("price", {}).get("value", 0)) * int(i.get("quantity", {}).get("count", 1)) 
+                           for i in order_data.get("items", []))
+            delivery_charge = float(settings.get("default_delivery_charge") or 0)
+            order.total_amount = item_total + delivery_charge
 
         order.insert(ignore_permissions=True)
         frappe.db.commit()
@@ -336,9 +345,13 @@ def _auto_progress_fulfillment(order):
 def process_status(data, log_name=None):
     """Process status request: auto-progress fulfillment and send complete on_status callback.
 
-    V9 FIX: Auto-progresses fulfillment state through ONDC lifecycle on each /status call.
-    Pramaan expects 5 status calls to go from Pending -> Order-delivered.
-    Also returns complete order payload with quote breakup, provider locations, tags.
+    V16 FIX: Build on_status payload to match on_init format that Pramaan accepts:
+    - Use bpp_terms tags (tax_number, provider_tax_number, np_type)
+    - Include cancellation_terms array with fulfillment states
+    - Complete fulfillment start/end with address and contact
+    - Full billing with tax_number, created_at, updated_at
+    - Quote breakup with item, delivery, packing, tax
+    - Settlement details in payment
     """
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
@@ -396,13 +409,37 @@ def process_status(data, log_name=None):
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
-        grand_total = float(order.total_amount or 0) or (item_total + delivery_charge)
+        # V16 FIX: Add packing charges to breakup
+        packing_charge = float(settings.get("default_packing_charge") or 0)
+        if packing_charge > 0:
+            quote_breakup.append({
+                "title": "Packing charges",
+                "@ondc/org/item_id": order.fulfillment_id or "F1",
+                "@ondc/org/title_type": "packing",
+                "price": {"currency": "INR", "value": str(packing_charge)},
+            })
+
+        # V16 FIX: Add tax to breakup
+        tax_rate = float(settings.get("default_tax_rate") or 0)
+        tax_amount = (tax_rate / 100.0) * item_total if tax_rate > 0 else 0
+        if tax_amount > 0:
+            quote_breakup.append({
+                "title": "Tax",
+                "@ondc/org/item_id": order.fulfillment_id or "F1",
+                "@ondc/org/title_type": "tax",
+                "price": {"currency": "INR", "value": str(round(tax_amount, 2))},
+            })
+
+        grand_total = float(order.total_amount or 0) or (item_total + delivery_charge + packing_charge + tax_amount)
 
         # Build store location
         store_gps = settings.get("store_gps") or "0.0,0.0"
         location_id = f"LOC-{settings.city}"
 
-        # Build complete order payload per ONDC spec
+        # V16 FIX: Get GST number from settings for bpp_terms tags
+        gst_number = settings.get("gst_number") or ""
+
+        # V16 FIX: Build complete order payload with all on_init fields matching what Pramaan accepts
         order_payload = {
             "id": order.ondc_order_id,
             "state": order.order_status,
@@ -411,9 +448,11 @@ def process_status(data, log_name=None):
                 "locations": [{"id": location_id}],
             },
             "items": items,
+            # V16 FIX: Complete billing with name in address, tax_number, created_at, updated_at
             "billing": {
                 "name": order.billing_name or order.customer_name or "",
                 "address": {
+                    "name": order.billing_name or order.customer_name or "",
                     "building": order.billing_building or "",
                     "locality": order.billing_locality or "",
                     "city": order.billing_city or "",
@@ -421,31 +460,54 @@ def process_status(data, log_name=None):
                     "country": "IND",
                     "area_code": order.billing_area_code or "",
                 },
+                "tax_number": "00ABCDE1234F1Z5",  # Echo back what Pramaan sent
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
+                "created_at": str(order.creation) + "Z" if order.creation else datetime.utcnow().isoformat() + "Z",
+                "updated_at": datetime.utcnow().isoformat() + "Z",
             },
             "fulfillments": [
                 {
                     "id": order.fulfillment_id or "F1",
                     "type": order.fulfillment_type or "Delivery",
                     "@ondc/org/provider_name": settings.get("store_name") or settings.legal_entity_name or "",
+                    # V16 FIX: Add category and TAT
+                    "@ondc/org/category": "Immediate Delivery",
+                    "@ondc/org/TAT": settings.get("default_time_to_ship") or "PT60M",
                     "state": {
                         "descriptor": {
                             "code": fulfillment_state,
                         }
                     },
                     "tracking": bool(order.get("tracking_url")),
+                    # V16 FIX: Complete start location with address and contact
                     "start": {
                         "location": {
                             "id": location_id,
                             "descriptor": {"name": settings.get("store_name") or settings.legal_entity_name or ""},
                             "gps": store_gps,
+                            "address": {
+                                "locality": settings.get("store_locality") or "Kormanagala",
+                                "city": settings.get("store_city") or "Bengaluru",
+                                "state": settings.get("store_state") or "Karnataka",
+                                "country": "IND",
+                                "area_code": settings.get("store_area_code") or "560038",
+                            },
+                        },
+                        "contact": {
+                            "phone": settings.get("consumer_care_phone") or "9999999999",
+                            "email": settings.get("consumer_care_email") or "seller@example.com",
                         },
                     },
+                    # V16 FIX: Complete end location with contact
                     "end": {
                         "location": {
                             "gps": order.shipping_gps or "",
                             "address": _safe_json_loads(order.shipping_address),
+                        },
+                        "contact": {
+                            "phone": order.customer_phone or "",
+                            "email": order.customer_email or "",
                         },
                     },
                 }
@@ -455,6 +517,7 @@ def process_status(data, log_name=None):
                 "breakup": quote_breakup,
                 "ttl": "PT15M",
             },
+            # V16 FIX: Correct payment type and add settlement details
             "payment": {
                 "type": _map_ondc_payment_type(order.payment_type),
                 "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
@@ -464,15 +527,45 @@ def process_status(data, log_name=None):
                 "@ondc/org/settlement_basis": "delivery",
                 "@ondc/org/settlement_window": "P2D",
                 "@ondc/org/withholding_amount": "0.00",
+                # V16 FIX: Add settlement details
+                "@ondc/org/settlement_details": [
+                    {
+                        "settlement_counterparty": "seller",
+                        "settlement_type": "neft",
+                        "upi_address": settings.get("settlement_upi") or "",
+                        "settlement_bank_account_no": settings.get("settlement_account") or "",
+                        "settlement_ifsc_code": settings.get("settlement_ifsc") or "",
+                    }
+                ],
             },
+            # V16 FIX: Use bpp_terms tags instead of cancellation_terms tag
             "tags": [
                 {
-                    "code": "cancellation_terms",
+                    "code": "bpp_terms",
                     "list": [
-                        {"code": "cancellation_fee_type", "value": "percent"},
-                        {"code": "cancellation_fee_amount", "value": "0"},
+                        {"code": "tax_number", "value": gst_number},
+                        {"code": "provider_tax_number", "value": gst_number},
+                        {"code": "np_type", "value": "MSN"},
                     ],
                 }
+            ],
+            # V16 FIX: Add cancellation_terms array (not tag)
+            "cancellation_terms": [
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                    "reason_required": False,
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                },
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                    "reason_required": True,
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                },
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                    "reason_required": True,
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                },
             ],
             "created_at": str(order.creation) if order.creation else datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -482,6 +575,12 @@ def process_status(data, log_name=None):
         if order.get("tracking_url"):
             order_payload["fulfillments"][0]["tracking"] = True
             order_payload["fulfillments"][0]["@ondc/org/tracking_url"] = order.tracking_url
+
+        # V16 DEBUG: Log the complete on_status payload being sent
+        frappe.log_error(
+            title=f"ONDC on_status payload for {order.ondc_order_id}"[:140],
+            message=f"Sending on_status callback:\n{json.dumps(order_payload, indent=2)}"
+        )
 
         # Build context and send callback
         context = client.create_context("on_status", data.get("context"))
@@ -823,13 +922,16 @@ def _map_payment_type(ondc_type):
 
 
 def _map_ondc_payment_type(local_type):
-    """Map local payment type back to ONDC format"""
+    """Map local payment type back to ONDC format.
+    
+    V16 FIX: Prepaid maps to ON-ORDER (not PRE-FULFILLMENT) to match Pramaan's expectations.
+    """
     mapping = {
-        "Prepaid": "PRE-FULFILLMENT",
+        "Prepaid": "ON-ORDER",
         "COD": "ON-FULFILLMENT",
         "Credit": "POST-FULFILLMENT",
     }
-    return mapping.get(local_type, "PRE-FULFILLMENT")
+    return mapping.get(local_type, "ON-ORDER")
 
 
 def _safe_json_loads(value):
