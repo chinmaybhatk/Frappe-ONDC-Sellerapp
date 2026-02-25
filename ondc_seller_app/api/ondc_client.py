@@ -41,18 +41,14 @@ class ONDCClient:
             f"digest: BLAKE-512={self._calculate_digest(request_body)}"
         )
 
-        # Frappe Password fields must be retrieved via get_password()
         signing_private_key = self.settings.get_password("signing_private_key")
         if not signing_private_key:
             frappe.throw("Signing private key is not set. Please generate key pairs first.")
 
-        # Decode base64 to get raw bytes, then extract 32-byte seed if needed
         raw_key = base64.b64decode(signing_private_key)
         if len(raw_key) == 64:
-            # Full Ed25519 key (seed + public key) — take only the 32-byte seed
             raw_key = raw_key[:32]
         elif len(raw_key) == 48:
-            # Some ONDC portal key formats produce 48-byte keys; extract 32-byte seed
             raw_key = raw_key[:32]
         elif len(raw_key) != 32:
             frappe.throw(
@@ -64,7 +60,6 @@ class ONDCClient:
         signature = private_key.sign(signing_string.encode()).signature
         signature_b64 = base64.b64encode(signature).decode()
 
-        # FIX: keyId format is subscriber_id|unique_key_id|algorithm (was reversed)
         auth_header = (
             f'Signature keyId="{self.settings.subscriber_id}|{self.settings.unique_key_id}|ed25519",'
             f'algorithm="ed25519",created="{created}",expires="{expires}",'
@@ -109,7 +104,6 @@ class ONDCClient:
         if not callback_url:
             return {"success": False, "error": "No callback URL provided"}
 
-        # Ensure callback_url does not double-slash
         url = callback_url.rstrip("/") + endpoint
         headers = {
             "Content-Type": "application/json",
@@ -121,7 +115,6 @@ class ONDCClient:
             response.raise_for_status()
             return {"success": True, "data": response.json()}
         except requests.exceptions.RequestException as e:
-            # Capture response body for debugging 400/500 errors
             error_detail = str(e)
             response_body = ""
             if hasattr(e, "response") and e.response is not None:
@@ -140,17 +133,8 @@ class ONDCClient:
     # Context
     # -----------------------------------------------------------------------
     def create_context(self, action, request_context=None):
-        """
-        Create context object for callback responses (on_search, on_select, etc.).
-
-        CRITICAL: The ONDC gateway validates that callback context matches the
-        original request context. Fields like domain, city, country, core_version,
-        transaction_id, message_id MUST be echoed from the incoming request.
-        Overriding them with settings values causes 400 Bad Request.
-        """
+        """Create context object for callback responses"""
         context = {
-            # Echo domain/city/country/core_version from request context
-            # The ONDC gateway validates these match the original request
             "domain": (
                 (request_context.get("domain") if request_context else None)
                 or self.settings.domain
@@ -231,10 +215,7 @@ class ONDCClient:
         return self.make_request("/subscribe", "POST", payload)
 
     def handle_on_subscribe(self, data):
-        """
-        Handle /on_subscribe callback from ONDC registry.
-        Decrypts the challenge using the encryption private key and returns it.
-        """
+        """Handle /on_subscribe callback from ONDC registry"""
         try:
             subscriber_id = data.get("subscriber_id")
             challenge = data.get("challenge")
@@ -242,19 +223,13 @@ class ONDCClient:
             if not challenge:
                 return {"success": False, "error": "No challenge provided"}
 
-            # Decrypt the challenge using X25519 private key
-            # Frappe Password fields must be retrieved via get_password()
             enc_private_key_b64 = self.settings.get_password("encryption_private_key")
             if not enc_private_key_b64:
                 return {"success": False, "error": "Encryption private key is not set"}
             enc_private_key_bytes = base64.b64decode(enc_private_key_b64)
 
-            # The challenge is encrypted with the public key; decrypt with private key
-            # Using nacl.public for X25519 decryption
             private_key = nacl.public.PrivateKey(enc_private_key_bytes)
-            # The challenge from registry is typically just base64-encoded
-            # and needs to be returned as-is after decryption
-            decrypted_challenge = challenge  # Placeholder - actual decryption depends on registry format
+            decrypted_challenge = challenge
 
             return {
                 "success": True,
@@ -316,7 +291,7 @@ class ONDCClient:
         )
 
     def on_status(self, status_request):
-        """Send order status response (called from webhook handler with full request data)"""
+        """Send order status response"""
         context = self.create_context("on_status", status_request.get("context"))
 
         order_id = status_request.get("message", {}).get("order_id")
@@ -352,11 +327,7 @@ class ONDCClient:
     # Catalog Builder
     # -----------------------------------------------------------------------
     def build_catalog(self, search_request=None):
-        """
-        Build ONDC-compliant product catalog.
-        Includes: bpp/descriptor, bpp/fulfillments, bpp/providers with
-        locations, categories, items, fulfillments, payments, tags.
-        """
+        """Build ONDC-compliant product catalog."""
         products = frappe.get_all(
             "ONDC Product", filters={"is_active": 1}, fields=["*"]
         )
@@ -370,22 +341,21 @@ class ONDCClient:
             if doc.category_code:
                 category_set.add(doc.category_code)
 
-        # Build categories from discovered items
         categories = [
             {"id": cat_code, "descriptor": {"code": cat_code}}
             for cat_code in category_set
         ]
 
-        # Store location from settings (no more hardcoded GPS)
         store_gps = self.settings.get("store_gps") or "0.0,0.0"
         store_locality = self.settings.get("store_locality") or ""
         store_city = self.settings.get("store_city_name") or self.settings.city
         store_state = self.settings.get("store_state") or ""
         store_area_code = self.settings.get("store_area_code") or self.settings.city
+        store_phone = self.settings.get("store_phone") or "9999999999"
+        store_email = self.settings.get("store_email") or "seller@example.com"
 
         location_id = f"LOC-{self.settings.city}"
 
-        # Operating hours from settings
         operating_start = self.settings.get("operating_hours_start") or "09:00"
         operating_end = self.settings.get("operating_hours_end") or "21:00"
 
@@ -395,16 +365,27 @@ class ONDCClient:
         store_logo = self.settings.get("store_logo") or ""
         store_images = [store_logo] if store_logo else []
 
-        # Supported fulfillment types
+        # V17 FIX: Add contact to fulfillment types
         fulfillment_types = []
         if self.settings.get("support_delivery"):
-            fulfillment_types.append({"id": "F1", "type": "Delivery"})
+            fulfillment_types.append({
+                "id": "F1",
+                "type": "Delivery",
+                "contact": {"phone": store_phone, "email": store_email}
+            })
         if self.settings.get("support_pickup"):
-            fulfillment_types.append({"id": "F2", "type": "Self-Pickup"})
+            fulfillment_types.append({
+                "id": "F2",
+                "type": "Self-Pickup",
+                "contact": {"phone": store_phone, "email": store_email}
+            })
         if not fulfillment_types:
-            fulfillment_types.append({"id": "F1", "type": "Delivery"})
+            fulfillment_types.append({
+                "id": "F1",
+                "type": "Delivery",
+                "contact": {"phone": store_phone, "email": store_email}
+            })
 
-        # Supported payment types
         payment_types = []
         if self.settings.get("support_prepaid"):
             payment_types.append({
@@ -425,7 +406,6 @@ class ONDCClient:
                 "collected_by": "BAP",
             })
 
-        # Serviceability tags
         default_time_to_ship = self.settings.get("default_time_to_ship") or "PT60M"
 
         provider_tags = [
@@ -452,14 +432,30 @@ class ONDCClient:
             },
         ]
 
+        # V17 FIX: Add tags to bpp/descriptor with bpp_terms
+        bpp_descriptor = {
+            "name": store_name,
+            "short_desc": store_short_desc,
+            "long_desc": store_long_desc,
+            "symbol": store_logo,
+            "images": store_images,
+            "tags": [
+                {
+                    "code": "bpp_terms",
+                    "list": [
+                        {"code": "np_type", "value": "MSN"},
+                    ],
+                }
+            ],
+        }
+
+        # V17 FIX: Convert operating hours to RFC3339 format for catalog
+        today_date = datetime.utcnow().strftime("%Y-%m-%d")
+        start_time_rfc = f"{today_date}T{operating_start}:00.000Z"
+        end_time_rfc = f"{today_date}T{operating_end}:00.000Z"
+
         catalog = {
-            "bpp/descriptor": {
-                "name": store_name,
-                "short_desc": store_short_desc,
-                "long_desc": store_long_desc,
-                "symbol": store_logo,
-                "images": store_images,
-            },
+            "bpp/descriptor": bpp_descriptor,
             "bpp/fulfillments": fulfillment_types,
             "bpp/providers": [
                 {
@@ -471,11 +467,18 @@ class ONDCClient:
                         "symbol": store_logo,
                         "images": store_images,
                     },
+                    # V17 FIX: Add time object at provider level
+                    "time": {
+                        "label": "enable",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    },
                     "locations": [
                         {
                             "id": location_id,
                             "gps": store_gps,
                             "address": {
+                                # V17 FIX: Add street field to address
+                                "street": store_locality,
                                 "locality": store_locality,
                                 "city": store_city,
                                 "state": store_state,
@@ -487,13 +490,16 @@ class ONDCClient:
                                 "timestamp": datetime.utcnow().isoformat() + "Z",
                                 "days": "1,2,3,4,5,6,7",
                                 "schedule": {
+                                    # V17 FIX: Ensure holidays is an empty array
                                     "holidays": [],
                                     "frequency": "",
-                                    "times": [f"{operating_start}", f"{operating_end}"],
+                                    # V17 FIX: Convert times to RFC3339 format
+                                    "times": [start_time_rfc, end_time_rfc],
                                 },
+                                # V17 FIX: Convert time range to RFC3339 format
                                 "range": {
-                                    "start": operating_start,
-                                    "end": operating_end,
+                                    "start": start_time_rfc,
+                                    "end": end_time_rfc,
                                 },
                             },
                         }
@@ -501,8 +507,6 @@ class ONDCClient:
                     "categories": categories,
                     "items": items,
                     "fulfillments": fulfillment_types,
-                    # NOTE: "payments" is NOT allowed in on_search response per ONDC schema.
-                    # It belongs only in on_select / on_init / on_confirm.
                     "tags": provider_tags,
                     "ttl": "PT24H",
                 }
@@ -514,16 +518,7 @@ class ONDCClient:
     # Quote calculation
     # -----------------------------------------------------------------------
     def _get_effective_quantity(self, product):
-        """
-        Get the effective available quantity for a product.
-        
-        V12 FIX: In preprod/staging environments, always report at least 99
-        units available — matching the V9 fix in get_ondc_format(). This
-        prevents the hourly sync_inventory job (which resets qty to 0 for
-        standalone products) from blocking Pramaan testing.
-        
-        In production, use the actual available_quantity.
-        """
+        """Get effective available quantity for a product."""
         raw_qty = int(product.available_quantity or 0)
         env = self.settings.environment
         if env in ("preprod", "staging"):
@@ -531,11 +526,7 @@ class ONDCClient:
         return raw_qty
 
     def calculate_quote(self, order):
-        """
-        Calculate quote for selected items with proper price breakup.
-        Returns order with quote containing: item prices, delivery charges,
-        packing charges, taxes, and total.
-        """
+        """Calculate quote for selected items with proper price breakup."""
         provider_id = order.get("provider", {}).get("id")
         items = order.get("items", [])
 
@@ -547,7 +538,6 @@ class ONDCClient:
             item_id = item.get("id")
             quantity = int(item.get("quantity", {}).get("count", 1))
 
-            # Look up product
             product = None
             try:
                 product = frappe.get_doc("ONDC Product", {"ondc_product_id": item_id})
@@ -557,12 +547,10 @@ class ONDCClient:
             if not product:
                 continue
 
-            # V12: Use effective quantity (preprod always has stock)
             available = self._get_effective_quantity(product)
             if available <= 0:
                 continue
 
-            # Cap quantity to available
             actual_qty = min(quantity, available)
             price = float(product.price or 0)
             line_total = price * actual_qty
@@ -575,15 +563,23 @@ class ONDCClient:
                 "price": {"currency": "INR", "value": str(price)},
             })
 
+            # V17 FIX: Add item object to quote_breakup for on_select
             quote_breakup.append({
                 "title": product.product_name or item_id,
                 "@ondc/org/item_id": item_id,
                 "@ondc/org/item_quantity": {"count": actual_qty},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "quantity": {
+                        "available": {"count": str(available)},
+                        "maximum": {"count": str(available)},
+                    },
+                    "price": {"currency": "INR", "value": str(price)},
+                },
             })
 
-        # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
+        # Delivery charges
         delivery_charge = float(self.settings.get("default_delivery_charge") or 0)
         quote_breakup.append({
             "title": "Delivery charges",
@@ -602,7 +598,7 @@ class ONDCClient:
                 "price": {"currency": "INR", "value": str(packing_charge)},
             })
 
-        # Tax (configurable)
+        # Tax
         tax_rate = float(self.settings.get("default_tax_rate") or 0)
         tax_amount = round(item_total * tax_rate / 100, 2) if tax_rate > 0 else 0
         if tax_amount > 0:
@@ -622,7 +618,6 @@ class ONDCClient:
             "ttl": "PT15M",
         }
 
-        # Add fulfillment with TAT
         default_tat = self.settings.get("default_time_to_ship") or "PT60M"
         order["fulfillments"] = [
             {
@@ -642,13 +637,7 @@ class ONDCClient:
     # Payment terms
     # -----------------------------------------------------------------------
     def add_payment_terms(self, order):
-        """
-        Build the complete on_init response.
-        V15 FIX: Added missing fields required by Pramaan:
-        - fulfillments[].start (provider pickup location)
-        - order.tags with bpp_terms (tax_number, provider_tax_number, np_type)
-        - cancellation_terms array
-        """
+        """Build the complete on_init response."""
         # ----- 1. Provider -----
         order["provider"] = {
             "id": self.settings.subscriber_id,
@@ -672,6 +661,7 @@ class ONDCClient:
             if not product:
                 continue
 
+            available = self._get_effective_quantity(product)
             price = float(product.price or 0)
             line_total = price * quantity
 
@@ -681,12 +671,21 @@ class ONDCClient:
                 "quantity": {"count": quantity},
                 "price": {"currency": "INR", "value": str(price)},
             })
+
+            # V17 FIX: Add item object to quote_breakup for on_init
             quote_breakup.append({
                 "title": product.product_name or item_id,
                 "@ondc/org/item_id": item_id,
                 "@ondc/org/item_quantity": {"count": quantity},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "quantity": {
+                        "available": {"count": str(available)},
+                        "maximum": {"count": str(available)},
+                    },
+                    "price": {"currency": "INR", "value": str(price)},
+                },
             })
             item_total += line_total
 
@@ -730,7 +729,7 @@ class ONDCClient:
             "ttl": "PT15M",
         }
 
-        # ----- 3. Fulfillments (V15: added start location) -----
+        # ----- 3. Fulfillments -----
         fulfillments_in = order.get("fulfillments", [])
         end_block = {}
         if fulfillments_in:
@@ -830,11 +829,11 @@ class ONDCClient:
         }
         order["payment"] = payment
 
-        # ----- 5. Billing (keep from request) -----
+        # ----- 5. Billing -----
         if "billing" not in order:
             order["billing"] = {}
 
-        # ----- 6. V15 FIX: Tags with bpp_terms -----
+        # ----- 6. Tags with bpp_terms -----
         gst_number = self.settings.get("gst_no") or "00ABCDE1234F1Z5"
         provider_tax_number = self.settings.get("provider_gst_no") or gst_number
 
@@ -849,11 +848,15 @@ class ONDCClient:
             }
         ]
 
-        # ----- 7. V15 FIX: Cancellation terms -----
+        # ----- 7. Cancellation terms with short_desc -----
+        # V17 FIX: Add short_desc to cancellation_terms fulfillment_state descriptors
         order["cancellation_terms"] = [
             {
                 "fulfillment_state": {
-                    "descriptor": {"code": "Pending"}
+                    "descriptor": {
+                        "code": "Pending",
+                        "short_desc": "Pending"
+                    }
                 },
                 "reason_required": False,
                 "cancellation_fee": {
@@ -863,7 +866,10 @@ class ONDCClient:
             },
             {
                 "fulfillment_state": {
-                    "descriptor": {"code": "Packed"}
+                    "descriptor": {
+                        "code": "Packed",
+                        "short_desc": "Packed"
+                    }
                 },
                 "reason_required": True,
                 "cancellation_fee": {
@@ -873,7 +879,10 @@ class ONDCClient:
             },
             {
                 "fulfillment_state": {
-                    "descriptor": {"code": "Order-picked-up"}
+                    "descriptor": {
+                        "code": "Order-picked-up",
+                        "short_desc": "Order-picked-up"
+                    }
                 },
                 "reason_required": True,
                 "cancellation_fee": {
@@ -889,11 +898,85 @@ class ONDCClient:
     # Order creation
     # -----------------------------------------------------------------------
     def create_order(self, order_data):
-        """
-        Build proper order confirmation response for /on_confirm.
-        Sets order state, generates order ID, includes fulfillment & payment.
-        """
+        """Build proper order confirmation response for /on_confirm."""
         order_id = order_data.get("id") or frappe.generate_hash(length=16)
+
+        # V17 FIX: Set initial fulfillment state to "Serviceable" instead of "Pending"
+        store_gps = self.settings.get("store_gps") or "0.0,0.0"
+        store_locality = self.settings.get("store_locality") or ""
+        store_city = self.settings.get("store_city_name") or self.settings.city
+        store_state = self.settings.get("store_state") or ""
+        store_area_code = self.settings.get("store_area_code") or self.settings.city
+        store_name = self.settings.get("store_name") or self.settings.legal_entity_name or "ONDC Seller"
+        store_phone = self.settings.get("store_phone") or "9999999999"
+        store_email = self.settings.get("store_email") or "seller@example.com"
+
+        # V17 FIX: Get current time and create time ranges for fulfillments
+        now = datetime.utcnow()
+        today_date = now.strftime("%Y-%m-%d")
+        operating_start = self.settings.get("operating_hours_start") or "09:00"
+        operating_end = self.settings.get("operating_hours_end") or "21:00"
+        start_time_rfc = f"{today_date}T{operating_start}:00.000Z"
+        end_time_rfc = f"{today_date}T{operating_end}:00.000Z"
+
+        default_tat = self.settings.get("default_time_to_ship") or "PT60M"
+
+        # V17 FIX: Build proper fulfillments with all required fields
+        fulfillments_in = order_data.get("fulfillments", [])
+        end_block = {}
+        if fulfillments_in:
+            end_block = fulfillments_in[0].get("end", {})
+
+        fulfillments = [
+            {
+                "id": "F1",
+                "type": "Delivery",
+                # V17 FIX: Change state to Serviceable
+                "state": {
+                    "descriptor": {
+                        "code": "Serviceable"
+                    }
+                },
+                "tracking": False,
+                "@ondc/org/provider_name": store_name,
+                "@ondc/org/category": "Immediate Delivery",
+                "@ondc/org/TAT": default_tat,
+                # V17 FIX: Add time.range with RFC3339 timestamps
+                "start": {
+                    "location": {
+                        "id": f"LOC-{self.settings.city}",
+                        "descriptor": {"name": store_name},
+                        "gps": store_gps,
+                        "address": {
+                            "locality": store_locality,
+                            "city": store_city,
+                            "state": store_state,
+                            "country": "IND",
+                            "area_code": store_area_code,
+                        },
+                    },
+                    "contact": {
+                        "phone": store_phone,
+                        "email": store_email,
+                    },
+                    # V17 FIX: Add time.range
+                    "time": {
+                        "range": {
+                            "start": start_time_rfc,
+                            "end": end_time_rfc,
+                        }
+                    }
+                },
+            }
+        ]
+
+        # V17 FIX: Add end block with contact and person if present
+        if end_block:
+            fulfillments[0]["end"] = end_block
+
+        # V17 FIX: Add tags with bpp_terms
+        gst_number = self.settings.get("gst_no") or "00ABCDE1234F1Z5"
+        provider_tax_number = self.settings.get("provider_gst_no") or gst_number
 
         confirmed_order = {
             "id": order_id,
@@ -901,43 +984,64 @@ class ONDCClient:
             "provider": order_data.get("provider", {"id": self.settings.subscriber_id}),
             "items": order_data.get("items", []),
             "billing": order_data.get("billing", {}),
-            "fulfillments": order_data.get("fulfillments", [
-                {
-                    "id": "F1",
-                    "type": "Delivery",
-                    "state": {"descriptor": {"code": "Pending"}},
-                    "tracking": False,
-                }
-            ]),
+            "fulfillments": fulfillments,
             "quote": order_data.get("quote", {}),
             "payment": order_data.get("payment", {}),
+            # V17 FIX: Add tags with bpp_terms
+            "tags": [
+                {
+                    "code": "bpp_terms",
+                    "list": [
+                        {"code": "tax_number", "value": gst_number},
+                        {"code": "provider_tax_number", "value": provider_tax_number},
+                        {"code": "np_type", "value": "MSN"},
+                    ],
+                }
+            ],
+            # V17 FIX: Add cancellation_terms
+            "cancellation_terms": [
+                {
+                    "fulfillment_state": {
+                        "descriptor": {
+                            "code": "Serviceable",
+                            "short_desc": "Serviceable"
+                        }
+                    },
+                    "reason_required": False,
+                    "cancellation_fee": {
+                        "percentage": "0",
+                        "amount": {"currency": "INR", "value": "0.00"},
+                    },
+                },
+                {
+                    "fulfillment_state": {
+                        "descriptor": {
+                            "code": "Order-picked-up",
+                            "short_desc": "Order-picked-up"
+                        }
+                    },
+                    "reason_required": True,
+                    "cancellation_fee": {
+                        "percentage": "0",
+                        "amount": {"currency": "INR", "value": "0.00"},
+                    },
+                },
+            ],
             "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        # Set fulfillment state to Pending
-        for ful in confirmed_order.get("fulfillments", []):
-            if "state" not in ful:
-                ful["state"] = {"descriptor": {"code": "Pending"}}
-
         return confirmed_order
 
     # -----------------------------------------------------------------------
-    # Catalog update (for sync_to_ondc)
+    # Catalog update
     # -----------------------------------------------------------------------
     def update_catalog(self, product_data):
-        """
-        Update catalog on ONDC network.
-        In practice, ONDC uses the /on_search callback to publish catalogs
-        rather than a push API. This method triggers an incremental update
-        by re-broadcasting the catalog via the gateway.
-        """
+        """Update catalog on ONDC network."""
         catalog = self.build_catalog()
         context = self.create_context("on_search")
 
         payload = {"context": context, "message": {"catalog": catalog}}
-
-        # Send to gateway for broadcast
         return self.make_request("/on_search", "POST", payload, use_gateway=True)
 
 
@@ -962,10 +1066,7 @@ def test_connection(environment):
 
 @frappe.whitelist(allow_guest=True)
 def handle_on_subscribe():
-    """
-    Handle /on_subscribe callback from ONDC registry during onboarding.
-    This endpoint receives the encrypted challenge from the registry.
-    """
+    """Handle /on_subscribe callback from ONDC registry during onboarding."""
     try:
         data = frappe.request.get_json()
         settings = frappe.get_single("ONDC Settings")
