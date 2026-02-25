@@ -3,7 +3,7 @@ import json
 from frappe import _
 from werkzeug.wrappers import Response
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ondc_seller_app.api.auth import verify_request, validate_context
 from ondc_seller_app.api.ondc_errors import (
@@ -349,10 +349,14 @@ def _auto_progress_fulfillment(order):
 def process_status(data, log_name=None):
     """Process status request: auto-progress fulfillment and send complete on_status callback.
 
-    V16 FIX: Comprehensive on_status response matching the on_init format that
-    Pramaan accepted. Includes proper bpp_terms tags, cancellation_terms array,
-    complete fulfillment start/end with address+contact, correct payment type,
-    and full quote breakup with packing and tax.
+    V17 FIXES (addressing ~300+ Pramaan failures):
+    - Fix Group A: Empty on_status for Order-picked-up — ensure all states return full payload
+    - Fix Group B: billing.address.name, tax_number, created_at/updated_at
+    - Fix Group C: payment.params (currency, amount, transaction_id)
+    - Fix Group D: fulfillment start/end time.range, time.timestamp, end.person, @ondc/org/TAT
+    - Fix Group I: created_at timestamp format (strip microseconds, proper RFC3339)
+    - Added item object to quote_breakup entries
+    - Added short_desc to cancellation_terms
     """
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
@@ -376,6 +380,22 @@ def process_status(data, log_name=None):
         # Re-read to get updated values
         order.reload()
 
+        # V17 FIX (Group I): Proper RFC3339 timestamp helper — strips microseconds
+        def _rfc3339(dt_val):
+            """Convert datetime/string to RFC3339 without microseconds."""
+            if not dt_val:
+                return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            if isinstance(dt_val, str):
+                dt_val = dt_val.replace(" ", "T")
+                # Strip microseconds if present (Frappe datetime has them)
+                if "." in dt_val:
+                    dt_val = dt_val.split(".")[0]
+                if not dt_val.endswith("Z"):
+                    dt_val += "Z"
+                return dt_val
+            # datetime object
+            return dt_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         # Build items list with full details
         items = []
         quote_breakup = []
@@ -393,12 +413,21 @@ def process_status(data, log_name=None):
                 "price": {"currency": "INR", "value": str(item_price)},
             })
 
+            # V17 FIX (Group F/D): Add item object to quote_breakup
             quote_breakup.append({
                 "title": item.item_code or item.ondc_item_id,
                 "@ondc/org/item_id": item.ondc_item_id,
                 "@ondc/org/item_quantity": {"count": item_qty},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {
+                    "id": item.ondc_item_id,
+                    "price": {"currency": "INR", "value": str(item_price)},
+                    "quantity": {
+                        "available": {"count": "99"},
+                        "maximum": {"count": str(item_qty)},
+                    },
+                },
             })
 
         # Delivery charges in quote breakup
@@ -410,7 +439,7 @@ def process_status(data, log_name=None):
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
-        # V16: Packing charges in quote breakup
+        # Packing charges in quote breakup
         packing_charge = float(settings.get("default_packing_charge") or 0)
         quote_breakup.append({
             "title": "Packing charges",
@@ -419,7 +448,7 @@ def process_status(data, log_name=None):
             "price": {"currency": "INR", "value": str(packing_charge)},
         })
 
-        # V16: Tax in quote breakup
+        # Tax in quote breakup
         tax_rate = float(settings.get("default_tax_rate") or 0) / 100
         tax_amount = round(item_total * tax_rate, 2)
         quote_breakup.append({
@@ -429,20 +458,58 @@ def process_status(data, log_name=None):
             "price": {"currency": "INR", "value": str(tax_amount)},
         })
 
-        # V16: Use stored total or compute full total with all charges
+        # Use stored total or compute full total with all charges
         grand_total = float(order.total_amount or 0)
         if grand_total <= item_total:
-            # total_amount was stored incorrectly (just items), recompute
             grand_total = item_total + delivery_charge + packing_charge + tax_amount
 
         # Build store location
         store_gps = settings.get("store_gps") or "0.0,0.0"
         location_id = f"LOC-{settings.city}"
 
-        # V16: GST number for tags
+        # GST number for tags
         gst_number = settings.get("gst_number") or "29AACCZ4465H1ZW"
 
-        # Build complete order payload per ONDC spec — V16 matching on_init format
+        # V17 FIX (Group I): Proper RFC3339 timestamps for created_at/updated_at
+        order_created_at = _rfc3339(str(order.creation) if order.creation else None)
+        order_updated_at = _rfc3339(datetime.utcnow())
+
+        # V17 FIX (Group D): Compute time.range and time.timestamp for fulfillment
+        tat_str = settings.get("default_time_to_ship") or "PT60M"
+        # Parse TAT minutes for time.range calculation
+        tat_minutes = 60  # default 1 hour
+        if "PT" in tat_str and "M" in tat_str:
+            try:
+                tat_minutes = int(tat_str.replace("PT", "").replace("M", ""))
+            except ValueError:
+                tat_minutes = 60
+
+        now_utc = datetime.utcnow()
+        range_start = _rfc3339(now_utc)
+        range_end = _rfc3339(now_utc + timedelta(minutes=tat_minutes))
+
+        # V17 FIX (Group D): Build start.time and end.time based on fulfillment state
+        start_time = {
+            "range": {
+                "start": order_created_at,
+                "end": range_end,
+            },
+        }
+        end_time = {
+            "range": {
+                "start": order_created_at,
+                "end": range_end,
+            },
+        }
+
+        # Add timestamps for active/completed states
+        active_states = ["Packed", "Agent-assigned", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
+        if fulfillment_state in active_states:
+            start_time["timestamp"] = range_start
+        if fulfillment_state in ["Out-for-delivery", "Order-delivered"]:
+            end_time["timestamp"] = range_start
+
+        # Build complete order payload per ONDC spec — V17 comprehensive fix
         order_payload = {
             "id": order.ondc_order_id,
             "state": order.order_status,
@@ -451,6 +518,7 @@ def process_status(data, log_name=None):
                 "locations": [{"id": location_id}],
             },
             "items": items,
+            # V17 FIX (Group B): Complete billing with address.name, tax_number, proper timestamps
             "billing": {
                 "name": order.billing_name or order.customer_name or "",
                 "address": {
@@ -462,12 +530,13 @@ def process_status(data, log_name=None):
                     "country": "IND",
                     "area_code": order.billing_area_code or "",
                 },
-                "tax_number": "00ABCDE1234F1Z5",
+                "tax_number": gst_number,
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
-                "created_at": str(order.creation).replace(" ", "T") + "Z" if order.creation else datetime.utcnow().isoformat() + "Z",
-                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": order_created_at,
+                "updated_at": order_updated_at,
             },
+            # V17 FIX (Group D): Complete fulfillment with time.range, timestamp, end.person
             "fulfillments": [
                 {
                     "id": order.fulfillment_id or "F1",
@@ -475,7 +544,7 @@ def process_status(data, log_name=None):
                     "@ondc/org/provider_name": settings.get("store_name") or settings.legal_entity_name or "",
                     "tracking": bool(order.get("tracking_url")),
                     "@ondc/org/category": "Immediate Delivery",
-                    "@ondc/org/TAT": settings.get("default_time_to_ship") or "PT60M",
+                    "@ondc/org/TAT": tat_str,
                     "state": {
                         "descriptor": {
                             "code": fulfillment_state,
@@ -494,6 +563,7 @@ def process_status(data, log_name=None):
                                 "area_code": settings.get("store_area_code") or "560038",
                             },
                         },
+                        "time": start_time,
                         "contact": {
                             "phone": settings.get("consumer_care_phone") or "9999999999",
                             "email": settings.get("consumer_care_email") or "seller@example.com",
@@ -503,6 +573,11 @@ def process_status(data, log_name=None):
                         "location": {
                             "gps": order.shipping_gps or "",
                             "address": _safe_json_loads(order.shipping_address),
+                        },
+                        "time": end_time,
+                        # V17 FIX (Group D): end.person required by spec
+                        "person": {
+                            "name": order.customer_name or order.billing_name or "",
                         },
                         "contact": {
                             "phone": order.customer_phone or "",
@@ -516,10 +591,16 @@ def process_status(data, log_name=None):
                 "breakup": quote_breakup,
                 "ttl": "PT15M",
             },
+            # V17 FIX (Group C): payment.params with currency, amount, transaction_id
             "payment": {
                 "type": _map_ondc_payment_type(order.payment_type),
                 "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
                 "collected_by": "BAP",
+                "params": {
+                    "currency": "INR",
+                    "amount": str(round(grand_total, 2)),
+                    "transaction_id": order.transaction_id or "",
+                },
                 "@ondc/org/buyer_app_finder_fee_type": "percent",
                 "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
                 "@ondc/org/settlement_basis": "delivery",
@@ -538,7 +619,7 @@ def process_status(data, log_name=None):
                     }
                 ],
             },
-            # V16: Proper bpp_terms tags (matching on_init format that Pramaan accepted)
+            # bpp_terms tags (matching on_init format)
             "tags": [
                 {
                     "code": "bpp_terms",
@@ -549,10 +630,15 @@ def process_status(data, log_name=None):
                     ],
                 }
             ],
-            # V16: Proper cancellation_terms array (matching on_init format)
+            # V17 FIX (Group G): cancellation_terms with short_desc in descriptor
             "cancellation_terms": [
                 {
-                    "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                    "fulfillment_state": {
+                        "descriptor": {
+                            "code": "Pending",
+                            "short_desc": "Cancellation is free before packing",
+                        }
+                    },
                     "reason_required": False,
                     "cancellation_fee": {
                         "percentage": "0",
@@ -560,7 +646,12 @@ def process_status(data, log_name=None):
                     },
                 },
                 {
-                    "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                    "fulfillment_state": {
+                        "descriptor": {
+                            "code": "Packed",
+                            "short_desc": "Cancellation may apply after packing",
+                        }
+                    },
                     "reason_required": True,
                     "cancellation_fee": {
                         "percentage": "0",
@@ -568,7 +659,12 @@ def process_status(data, log_name=None):
                     },
                 },
                 {
-                    "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                    "fulfillment_state": {
+                        "descriptor": {
+                            "code": "Order-picked-up",
+                            "short_desc": "Cancellation may apply after pickup",
+                        }
+                    },
                     "reason_required": True,
                     "cancellation_fee": {
                         "percentage": "0",
@@ -576,8 +672,8 @@ def process_status(data, log_name=None):
                     },
                 },
             ],
-            "created_at": str(order.creation).replace(" ", "T") + "Z" if order.creation else datetime.utcnow().isoformat() + "Z",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": order_created_at,
+            "updated_at": order_updated_at,
         }
 
         # Add tracking URL if available
@@ -592,9 +688,9 @@ def process_status(data, log_name=None):
             "message": {"order": order_payload},
         }
 
-        # V16: Debug log the on_status payload for troubleshooting
+        # V17: Debug log with fulfillment state for tracking auto-progression
         frappe.log_error(
-            title="ONDC on_status payload"[:140],
+            title=f"ONDC on_status [{fulfillment_state}]"[:140],
             message=json.dumps(payload, indent=2)
         )
 
