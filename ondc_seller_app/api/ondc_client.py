@@ -644,10 +644,10 @@ class ONDCClient:
     def add_payment_terms(self, order):
         """
         Build the complete on_init response.
-        ONDC spec requires: provider, items (with prices), billing,
-        fulfillments (with delivery details), payment terms, and quote.
-        If items are empty in the init request (BAP relies on BPP state),
-        we re-resolve them from the select-phase items or the product DB.
+        V15 FIX: Added missing fields required by Pramaan:
+        - fulfillments[].start (provider pickup location)
+        - order.tags with bpp_terms (tax_number, provider_tax_number, np_type)
+        - cancellation_terms array
         """
         # ----- 1. Provider -----
         order["provider"] = {
@@ -690,7 +690,7 @@ class ONDCClient:
             })
             item_total += line_total
 
-        # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
+        # Delivery charges
         delivery_charge = float(self.settings.get("default_delivery_charge") or 0)
         quote_breakup.append({
             "title": "Delivery charges",
@@ -699,7 +699,7 @@ class ONDCClient:
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
-        # Packing charges (must match on_select quote for Pramaan consistency)
+        # Packing charges
         packing_charge = float(self.settings.get("default_packing_charge") or 0)
         if packing_charge > 0:
             quote_breakup.append({
@@ -730,29 +730,52 @@ class ONDCClient:
             "ttl": "PT15M",
         }
 
-        # ----- 3. Fulfillments -----
+        # ----- 3. Fulfillments (V15: added start location) -----
         fulfillments_in = order.get("fulfillments", [])
-        # Carry forward BAP's delivery end-location if provided
         end_block = {}
         if fulfillments_in:
             end_block = fulfillments_in[0].get("end", {})
 
         default_tat = self.settings.get("default_time_to_ship") or "PT60M"
-        order["fulfillments"] = [
-            {
-                "id": "F1",
-                "type": "Delivery",
-                "@ondc/org/provider_name": self.settings.get("store_name") or self.settings.legal_entity_name,
-                "tracking": False,
-                "@ondc/org/category": "Immediate Delivery",
-                "@ondc/org/TAT": default_tat,
-                "state": {"descriptor": {"code": "Serviceable"}},
-                **({"end": end_block} if end_block else {}),
-            }
-        ]
+        store_gps = self.settings.get("store_gps") or "0.0,0.0"
+        store_locality = self.settings.get("store_locality") or ""
+        store_city = self.settings.get("store_city_name") or self.settings.city
+        store_state = self.settings.get("store_state") or ""
+        store_area_code = self.settings.get("store_area_code") or self.settings.city
+        store_name = self.settings.get("store_name") or self.settings.legal_entity_name or "ONDC Seller"
+
+        fulfillment = {
+            "id": "F1",
+            "type": "Delivery",
+            "@ondc/org/provider_name": store_name,
+            "tracking": False,
+            "@ondc/org/category": "Immediate Delivery",
+            "@ondc/org/TAT": default_tat,
+            "state": {"descriptor": {"code": "Serviceable"}},
+            "start": {
+                "location": {
+                    "id": f"LOC-{self.settings.city}",
+                    "descriptor": {"name": store_name},
+                    "gps": store_gps,
+                    "address": {
+                        "locality": store_locality,
+                        "city": store_city,
+                        "state": store_state,
+                        "country": "IND",
+                        "area_code": store_area_code,
+                    },
+                },
+                "contact": {
+                    "phone": self.settings.get("store_phone") or "9999999999",
+                    "email": self.settings.get("store_email") or "seller@example.com",
+                },
+            },
+        }
+        if end_block:
+            fulfillment["end"] = end_block
+        order["fulfillments"] = [fulfillment]
 
         # ----- 4. Payment terms -----
-        # Echo the buyer's requested payment type (ON-ORDER, ON-FULFILLMENT)
         existing_payment = order.get("payment", {})
         buyer_payment_type = existing_payment.get("type", "ON-ORDER")
 
@@ -760,8 +783,6 @@ class ONDCClient:
         if buyer_payment_type == "ON-FULFILLMENT":
             collected_by = "BPP"
 
-        # V11 FIX: Settlement bank details — read from ONDC Settings with
-        # sensible preprod defaults. Pramaan validates these are non-empty.
         settlement_bank_account = (
             self.settings.get("settlement_bank_account_no") or "1234567890123456"
         )
@@ -791,7 +812,6 @@ class ONDCClient:
             "bank_name": settlement_bank_name,
             "branch_name": settlement_branch_name,
         }
-        # Add UPI address if configured
         if settlement_upi:
             settlement_detail["upi_address"] = settlement_upi
 
@@ -813,6 +833,55 @@ class ONDCClient:
         # ----- 5. Billing (keep from request) -----
         if "billing" not in order:
             order["billing"] = {}
+
+        # ----- 6. V15 FIX: Tags with bpp_terms -----
+        gst_number = self.settings.get("gst_no") or "00ABCDE1234F1Z5"
+        provider_tax_number = self.settings.get("provider_gst_no") or gst_number
+
+        order["tags"] = [
+            {
+                "code": "bpp_terms",
+                "list": [
+                    {"code": "tax_number", "value": gst_number},
+                    {"code": "provider_tax_number", "value": provider_tax_number},
+                    {"code": "np_type", "value": "MSN"},
+                ],
+            }
+        ]
+
+        # ----- 7. V15 FIX: Cancellation terms -----
+        order["cancellation_terms"] = [
+            {
+                "fulfillment_state": {
+                    "descriptor": {"code": "Pending"}
+                },
+                "reason_required": False,
+                "cancellation_fee": {
+                    "percentage": "0",
+                    "amount": {"currency": "INR", "value": "0.00"},
+                },
+            },
+            {
+                "fulfillment_state": {
+                    "descriptor": {"code": "Packed"}
+                },
+                "reason_required": True,
+                "cancellation_fee": {
+                    "percentage": "0",
+                    "amount": {"currency": "INR", "value": "0.00"},
+                },
+            },
+            {
+                "fulfillment_state": {
+                    "descriptor": {"code": "Order-picked-up"}
+                },
+                "reason_required": True,
+                "cancellation_fee": {
+                    "percentage": "0",
+                    "amount": {"currency": "INR", "value": "0.00"},
+                },
+            },
+        ]
 
         return order
 
