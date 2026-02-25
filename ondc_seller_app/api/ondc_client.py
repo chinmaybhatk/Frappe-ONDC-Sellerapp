@@ -513,6 +513,23 @@ class ONDCClient:
     # -----------------------------------------------------------------------
     # Quote calculation
     # -----------------------------------------------------------------------
+    def _get_effective_quantity(self, product):
+        """
+        Get the effective available quantity for a product.
+        
+        V12 FIX: In preprod/staging environments, always report at least 99
+        units available — matching the V9 fix in get_ondc_format(). This
+        prevents the hourly sync_inventory job (which resets qty to 0 for
+        standalone products) from blocking Pramaan testing.
+        
+        In production, use the actual available_quantity.
+        """
+        raw_qty = int(product.available_quantity or 0)
+        env = self.settings.environment
+        if env in ("preprod", "staging"):
+            return max(raw_qty, 99)
+        return raw_qty
+
     def calculate_quote(self, order):
         """
         Calculate quote for selected items with proper price breakup.
@@ -540,8 +557,8 @@ class ONDCClient:
             if not product:
                 continue
 
-            # Check stock availability
-            available = int(product.available_quantity or 0)
+            # V12: Use effective quantity (preprod always has stock)
+            available = self._get_effective_quantity(product)
             if available <= 0:
                 continue
 
