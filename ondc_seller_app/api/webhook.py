@@ -910,8 +910,328 @@ def process_track(data, log_name=None):
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
 
 
+def _build_on_cancel_payload(order, data, cancelled_by, cancellation_reason_id, settings, client):
+    """V21: Build a complete on_cancel order payload by loading from confirm cache.
+
+    Mirrors process_status logic — echoes billing, quote, payment, fulfillment
+    from the original confirm so Pramaan finds all required fields.
+    Also handles Flow 3C (merchant-initiated cancel) where data may be synthetic.
+    """
+    from datetime import datetime, timedelta
+
+    order_id = order.ondc_order_id
+
+    # V21 FIX: Load original confirm data from cache (same as process_status)
+    confirm_cache_key = f"ondc_confirm_{order_id}"
+    original_order_data = {}
+    try:
+        confirm_raw = frappe.cache().get_value(confirm_cache_key)
+        if confirm_raw:
+            confirm_json = json.loads(confirm_raw)
+            original_order_data = confirm_json.get("message", {}).get("order", {})
+            frappe.log_error(
+                title="ONDC on_cancel: Confirm Data Loaded from Cache",
+                message=f"Loaded cached confirm data for on_cancel {order_id}"
+            )
+    except Exception as cache_err:
+        frappe.log_error(
+            title="ONDC on_cancel: Cache Load Failed",
+            message=f"Failed to load confirm cache for {order_id}: {str(cache_err)}"
+        )
+
+    def _echo_timestamp(ts_str):
+        if not ts_str:
+            return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_str = str(ts_str).replace(" ", "T")
+        if "." in ts_str and not ts_str.endswith("Z"):
+            ts_str += "Z"
+        elif not ts_str.endswith("Z"):
+            ts_str += "Z"
+        return ts_str
+
+    def _new_timestamp():
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Timestamps
+    order_created_at = original_order_data.get("created_at")
+    if order_created_at:
+        order_created_at = _echo_timestamp(order_created_at)
+    else:
+        order_created_at = _echo_timestamp(str(order.creation) if order.creation else None)
+    order_updated_at = _new_timestamp()
+
+    # Settings-derived values
+    gst_number = settings.get("gst_number") or "29AACCZ4465H1ZW"
+    store_gps = settings.get("store_gps") or "0.0,0.0"
+    location_id = f"LOC-{settings.city}"
+    tat_str = settings.get("default_time_to_ship") or "PT60M"
+    tat_minutes = 60
+    if "PT" in tat_str and "M" in tat_str:
+        try:
+            tat_minutes = int(tat_str.replace("PT", "").replace("M", ""))
+        except ValueError:
+            tat_minutes = 60
+    now_utc = datetime.utcnow()
+    range_start = order_created_at
+    range_end = (now_utc + timedelta(minutes=tat_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Items + quote breakup (from order doc)
+    items = []
+    quote_breakup = []
+    item_total = 0.0
+    for item in order.items:
+        item_price = float(item.price or 0)
+        item_qty = int(item.quantity or 1)
+        line_total = item_price * item_qty
+        item_total += line_total
+        items.append({
+            "id": item.ondc_item_id,
+            "fulfillment_id": order.fulfillment_id or "F1",
+            "quantity": {"count": item_qty},
+            "price": {"currency": "INR", "value": str(item_price)},
+        })
+        quote_breakup.append({
+            "title": item.item_code or item.ondc_item_id,
+            "@ondc/org/item_id": item.ondc_item_id,
+            "@ondc/org/item_quantity": {"count": item_qty},
+            "@ondc/org/title_type": "item",
+            "price": {"currency": "INR", "value": str(line_total)},
+            "item": {
+                "id": item.ondc_item_id,
+                "price": {"currency": "INR", "value": str(item_price)},
+                "quantity": {
+                    "available": {"count": "0"},
+                    "maximum": {"count": str(item_qty)},
+                },
+            },
+        })
+
+    delivery_charge = float(settings.get("default_delivery_charge") or 0)
+    packing_charge = float(settings.get("default_packing_charge") or 0)
+    tax_rate = float(settings.get("default_tax_rate") or 0) / 100
+    tax_amount = round(item_total * tax_rate, 2)
+    quote_breakup.append({"title": "Delivery charges", "@ondc/org/item_id": order.fulfillment_id or "F1", "@ondc/org/title_type": "delivery", "price": {"currency": "INR", "value": str(delivery_charge)}})
+    quote_breakup.append({"title": "Packing charges", "@ondc/org/item_id": order.fulfillment_id or "F1", "@ondc/org/title_type": "packing", "price": {"currency": "INR", "value": str(packing_charge)}})
+    quote_breakup.append({"title": "Tax", "@ondc/org/item_id": order.fulfillment_id or "F1", "@ondc/org/title_type": "tax", "price": {"currency": "INR", "value": str(tax_amount)}})
+    grand_total = float(order.total_amount or 0)
+    if grand_total <= item_total:
+        grand_total = item_total + delivery_charge + packing_charge + tax_amount
+
+    # Billing — echo from cache or fallback to order doc
+    if original_order_data.get("billing"):
+        billing_payload = original_order_data["billing"].copy()
+        if "created_at" in billing_payload:
+            billing_payload["created_at"] = _echo_timestamp(billing_payload["created_at"])
+        if "updated_at" in billing_payload:
+            billing_payload["updated_at"] = _echo_timestamp(billing_payload["updated_at"])
+    else:
+        billing_payload = {
+            "name": order.billing_name or order.customer_name or "",
+            "address": {
+                "name": order.billing_name or order.customer_name or "",
+                "building": order.billing_building or "",
+                "locality": order.billing_locality or "",
+                "city": order.billing_city or "",
+                "state": order.billing_state or "",
+                "country": "IND",
+                "area_code": order.billing_area_code or "",
+            },
+            "email": order.customer_email or "",
+            "phone": order.customer_phone or "",
+            "created_at": order_created_at,
+            "updated_at": order_updated_at,
+        }
+
+    # Quote — echo from cache
+    if original_order_data.get("quote"):
+        quote_payload = original_order_data["quote"].copy()
+        quote_payload["breakup"] = quote_breakup
+        quote_payload["price"] = {"currency": "INR", "value": str(round(grand_total, 2))}
+    else:
+        quote_payload = {
+            "price": {"currency": "INR", "value": str(round(grand_total, 2))},
+            "breakup": quote_breakup,
+            "ttl": "PT15M",
+        }
+
+    # Payment — echo from cache, mark as NOT-PAID (refund pending)
+    if original_order_data.get("payment"):
+        payment_payload = original_order_data["payment"].copy()
+        payment_payload["status"] = "NOT-PAID"
+        if "params" not in payment_payload:
+            payment_payload["params"] = {
+                "currency": "INR",
+                "amount": str(round(grand_total, 2)),
+                "transaction_id": order.transaction_id or "",
+            }
+        else:
+            payment_payload["params"]["currency"] = "INR"
+            payment_payload["params"]["amount"] = str(round(grand_total, 2))
+            if not payment_payload["params"].get("transaction_id"):
+                payment_payload["params"]["transaction_id"] = order.transaction_id or ""
+    else:
+        payment_payload = {
+            "type": _map_ondc_payment_type(order.payment_type),
+            "status": "NOT-PAID",
+            "collected_by": "BAP",
+            "params": {
+                "currency": "INR",
+                "amount": str(round(grand_total, 2)),
+                "transaction_id": order.transaction_id or "",
+            },
+            "@ondc/org/buyer_app_finder_fee_type": "percent",
+            "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
+            "@ondc/org/settlement_basis": "delivery",
+            "@ondc/org/settlement_window": "P2D",
+            "@ondc/org/withholding_amount": "0.00",
+            "@ondc/org/settlement_details": [
+                {
+                    "settlement_counterparty": "seller-app",
+                    "settlement_phase": "sale-amount",
+                    "settlement_type": "neft",
+                    "beneficiary_name": settings.get("legal_entity_name") or "",
+                    "settlement_bank_account_no": settings.get("settlement_account") or "",
+                    "settlement_ifsc_code": settings.get("settlement_ifsc") or "",
+                    "bank_name": settings.get("settlement_bank_name") or "",
+                    "branch_name": settings.get("settlement_branch_name") or "",
+                    "upi_address": settings.get("upi_address") or "",
+                }
+            ],
+        }
+
+    # Fulfillment end block — echo from cache
+    end_location_gps = order.shipping_gps or ""
+    end_location_address = _safe_json_loads(order.shipping_address)
+    end_person_name = order.customer_name or order.billing_name or ""
+    end_contact_phone = order.customer_phone or ""
+    end_contact_email = order.customer_email or ""
+    if original_order_data.get("fulfillments"):
+        orig_f = original_order_data["fulfillments"][0] if original_order_data["fulfillments"] else {}
+        if orig_f.get("end"):
+            eb = orig_f["end"]
+            if eb.get("location"):
+                end_location_gps = eb["location"].get("gps") or end_location_gps
+                if eb["location"].get("address"):
+                    end_location_address = eb["location"]["address"]
+            if eb.get("person"):
+                end_person_name = eb["person"].get("name") or end_person_name
+            if eb.get("contact"):
+                end_contact_phone = eb["contact"].get("phone") or end_contact_phone
+                end_contact_email = eb["contact"].get("email") or end_contact_email
+
+    fulfillment_tags = []
+    if original_order_data.get("fulfillments") and original_order_data["fulfillments"]:
+        orig_tags = original_order_data["fulfillments"][0].get("tags")
+        if orig_tags:
+            fulfillment_tags = orig_tags
+
+    order_payload = {
+        "id": order.ondc_order_id,
+        "state": "Cancelled",
+        "provider": {
+            "id": settings.subscriber_id,
+            "locations": [{"id": location_id}],
+        },
+        "items": items,
+        "billing": billing_payload,
+        "fulfillments": [
+            {
+                "id": order.fulfillment_id or "F1",
+                "type": order.fulfillment_type or "Delivery",
+                "@ondc/org/provider_name": settings.get("store_name") or settings.legal_entity_name or "",
+                "tracking": False,
+                "@ondc/org/category": "Immediate Delivery",
+                "@ondc/org/TAT": tat_str,
+                "state": {
+                    "descriptor": {"code": "Cancelled"},
+                },
+                "start": {
+                    "location": {
+                        "id": location_id,
+                        "descriptor": {"name": settings.get("store_name") or settings.legal_entity_name or ""},
+                        "gps": store_gps,
+                        "address": {
+                            "locality": settings.get("store_locality") or "Kormanagala",
+                            "city": settings.get("store_city") or "Bengaluru",
+                            "state": settings.get("store_state") or "Karnataka",
+                            "country": "IND",
+                            "area_code": settings.get("store_area_code") or "560038",
+                        },
+                    },
+                    "time": {
+                        "range": {"start": range_start, "end": range_end},
+                    },
+                    "contact": {
+                        "phone": settings.get("consumer_care_phone") or "9999999999",
+                        "email": settings.get("consumer_care_email") or "seller@example.com",
+                    },
+                },
+                "end": {
+                    "location": {
+                        "gps": end_location_gps,
+                        "address": end_location_address,
+                    },
+                    "time": {
+                        "range": {"start": range_start, "end": range_end},
+                    },
+                    "person": {"name": end_person_name},
+                    "contact": {
+                        "phone": end_contact_phone,
+                        "email": end_contact_email,
+                    },
+                },
+                "tags": fulfillment_tags,
+            }
+        ],
+        "quote": quote_payload,
+        "payment": payment_payload,
+        "cancellation": {
+            "cancelled_by": cancelled_by,
+            "reason": {
+                "id": str(cancellation_reason_id),
+                "descriptor": {
+                    "short_desc": get_cancellation_reason(cancellation_reason_id),
+                },
+            },
+        },
+        "cancellation_terms": [
+            {
+                "fulfillment_state": {"descriptor": {"code": "Pending", "short_desc": "Cancellation is free before packing"}},
+                "reason_required": False,
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                "refund_eligible": True,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Packed", "short_desc": "Cancellation may apply after packing"}},
+                "reason_required": True,
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                "refund_eligible": True,
+            },
+        ],
+        "tags": [
+            {
+                "code": "bpp_terms",
+                "list": [
+                    {"code": "tax_number", "value": gst_number},
+                    {"code": "provider_tax_number", "value": gst_number},
+                    {"code": "np_type", "value": "MSN"},
+                ],
+            }
+        ],
+        "created_at": order_created_at,
+        "updated_at": order_updated_at,
+    }
+
+    return order_payload
+
+
 def process_cancel(data, log_name=None):
-    """Process cancel request with proper cancellation reason codes and refund terms"""
+    """V21: Process buyer-initiated cancel (/cancel → on_cancel).
+
+    V21 FIX: Echo full order body from confirm cache so Pramaan finds all required
+    fields (billing, items, quote, payment, fulfillment start/end). Fixes 150
+    Pramaan failures (Flow 2: Buyer Side Order Cancellation).
+    """
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
 
@@ -945,55 +1265,21 @@ def process_cancel(data, log_name=None):
         client = ONDCClient(settings)
         context = client.create_context("on_cancel", data.get("context"))
 
-        # Build cancellation response with refund terms
-        order_payload = {
-            "id": order.ondc_order_id,
-            "state": "Cancelled",
-            "cancellation": {
-                "cancelled_by": data.get("context", {}).get("bap_id", ""),
-                "reason": {
-                    "id": str(cancellation_reason_id),
-                    "descriptor": {
-                        "short_desc": get_cancellation_reason(cancellation_reason_id),
-                    },
-                },
-            },
-            "tags": [
-                {
-                    "code": "cancellation_terms",
-                    "list": [
-                        {"code": "cancellation_fee_type", "value": "percent"},
-                        {"code": "cancellation_fee_amount", "value": "0"},
-                        {"code": "refund_eligible", "value": "true"},
-                    ],
-                }
-            ],
-            "payment": {
-                "type": order.payment_type or "PRE-FULFILLMENT",
-                "status": "NOT-PAID",
-                "@ondc/org/settlement_details": [
-                    {
-                        "settlement_counterparty": "buyer-app",
-                        "settlement_type": "refund",
-                        "settlement_amount": str(order.total_amount or 0),
-                    }
-                ],
-            },
-            "fulfillments": [
-                {
-                    "id": order.fulfillment_id,
-                    "type": order.fulfillment_type or "Delivery",
-                    "state": {
-                        "descriptor": {"code": "Cancelled"}
-                    },
-                }
-            ],
-        }
+        # V21 FIX: Build full order payload from confirm cache
+        cancelled_by = data.get("context", {}).get("bap_id", "")
+        order_payload = _build_on_cancel_payload(
+            order, data, cancelled_by, cancellation_reason_id, settings, client
+        )
 
         payload = {
             "context": context,
             "message": {"order": order_payload},
         }
+
+        frappe.log_error(
+            title="ONDC on_cancel [Buyer]",
+            message=json.dumps(payload, indent=2)
+        )
 
         result = client.send_callback(
             data.get("context", {}).get("bap_uri"),
@@ -1005,6 +1291,86 @@ def process_cancel(data, log_name=None):
     except Exception as e:
         frappe.log_error(traceback.format_exc(), "ONDC process_cancel Error")
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
+
+
+def trigger_merchant_cancel(order_id, cancellation_reason_id="003", cancelled_by_bpp=True):
+    """V21: Flow 3C — Merchant/seller-initiated unsolicited on_cancel.
+
+    Called when the merchant cancels an order (e.g., out of stock, seller reject).
+    BPP sends on_cancel proactively WITHOUT waiting for a /cancel from the buyer.
+    This satisfies Flow 3C: Merchant Side Full Order Cancellation.
+
+    Usage: Call this from Frappe UI button or scheduled job when seller cancels.
+    """
+    try:
+        from ondc_seller_app.api.ondc_client import ONDCClient
+
+        try:
+            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
+        except frappe.DoesNotExistError:
+            frappe.log_error(
+                title="ONDC Merchant Cancel: Order Not Found",
+                message=f"Order {order_id} not found for merchant cancel"
+            )
+            return {"success": False, "error": f"Order not found: {order_id}"}
+
+        if order.order_status in ("Completed", "Cancelled"):
+            return {"success": False, "error": f"Order already {order.order_status}"}
+
+        # Update order status
+        prev_state = order.order_status
+        order.order_status = "Cancelled"
+        order.fulfillment_state = "Cancelled"
+        order.cancellation_reason_id = str(cancellation_reason_id)
+        order.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        settings = frappe.get_single("ONDC Settings")
+        client = ONDCClient(settings)
+
+        # Load original confirm data to reconstruct context
+        confirm_cache_key = f"ondc_confirm_{order_id}"
+        original_context = {}
+        try:
+            confirm_raw = frappe.cache().get_value(confirm_cache_key)
+            if confirm_raw:
+                confirm_json = json.loads(confirm_raw)
+                original_context = confirm_json.get("context", {})
+        except Exception:
+            pass
+
+        # Synthetic data dict for context reconstruction
+        synthetic_data = {"context": original_context}
+        context = client.create_context("on_cancel", original_context)
+
+        # V21: cancelled_by is BPP (merchant) for Flow 3C
+        cancelled_by = settings.subscriber_id if cancelled_by_bpp else original_context.get("bap_id", "")
+        order_payload = _build_on_cancel_payload(
+            order, synthetic_data, cancelled_by, cancellation_reason_id, settings, client
+        )
+
+        payload = {
+            "context": context,
+            "message": {"order": order_payload},
+        }
+
+        frappe.log_error(
+            title="ONDC on_cancel [Merchant/Flow 3C]",
+            message=json.dumps(payload, indent=2)
+        )
+
+        bap_uri = original_context.get("bap_uri") or order.bap_uri
+        result = client.send_callback(bap_uri, "/on_cancel", payload)
+
+        frappe.log_error(
+            title="ONDC Merchant Cancel Sent",
+            message=f"Order {order_id}: on_cancel sent to {bap_uri}, result: {result}"
+        )
+        return result
+
+    except Exception as e:
+        frappe.log_error(traceback.format_exc(), "ONDC trigger_merchant_cancel Error")
+        return {"success": False, "error": str(e)}
 
 
 def process_update(data, log_name=None):
