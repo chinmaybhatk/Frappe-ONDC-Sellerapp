@@ -129,9 +129,61 @@ def calculate_digest(request_body):
     return base64.b64encode(digest).decode()
 
 
+def _attempt_registry_lookup(registry_url, payload, unique_key_id):
+    """
+    Attempt a single registry lookup with the given payload.
+    
+    Args:
+        registry_url: The registry endpoint URL
+        payload: The request payload dictionary
+        unique_key_id: The unique key ID to match against
+    
+    Returns:
+        str: The signing public key if found, None otherwise
+    """
+    try:
+        response = requests.post(
+            registry_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Handle list response
+            if isinstance(data, list) and len(data) > 0:
+                for entry in data:
+                    if entry.get("ukId") == unique_key_id or entry.get("unique_key_id") == unique_key_id:
+                        signing_key = entry.get("signing_public_key")
+                        if signing_key:
+                            return signing_key
+                # Fallback to first entry's key
+                signing_key = data[0].get("signing_public_key")
+                if signing_key:
+                    return signing_key
+            
+            # Handle dict response
+            elif isinstance(data, dict):
+                signing_key = data.get("signing_public_key")
+                if signing_key:
+                    return signing_key
+        
+        return None
+    except requests.exceptions.RequestException:
+        return None
+    except (ValueError, KeyError):
+        return None
+
+
 def lookup_public_key(subscriber_id, unique_key_id):
     """
     Look up a network participant's public key from the ONDC registry.
+    
+    V13 FIX: Uses minimal filters first (no type/domain) to ensure
+    gateway keys (BG type) and cross-domain lookups always work.
+    Falls back to typed lookups if minimal fails. Caches results for 1 hour.
     
     Args:
         subscriber_id: The subscriber's FQDN
@@ -141,6 +193,12 @@ def lookup_public_key(subscriber_id, unique_key_id):
         str: Base64-encoded public key, or None if not found
     """
     try:
+        # Check cache first
+        cache_key = f"ondc_pubkey:{subscriber_id}:{unique_key_id}"
+        cached_key = frappe.cache().get_value(cache_key)
+        if cached_key:
+            return cached_key
+        
         settings = frappe.get_single("ONDC Settings")
         
         # Registry lookup URL based on environment
@@ -152,48 +210,49 @@ def lookup_public_key(subscriber_id, unique_key_id):
         
         registry_url = registry_urls.get(settings.environment, registry_urls["staging"])
         
-        # Make lookup request
+        # V13 FIX: Try minimal lookup first (no domain or type filter)
+        # This ensures gateway (BG) keys and cross-domain lookups work
         payload = {
             "subscriber_id": subscriber_id,
-            "ukId": unique_key_id,
-            "domain": settings.domain,
-            "type": "BAP"  # We are BPP, looking up BAP keys
+            "ukId": unique_key_id
         }
         
-        response = requests.post(
-            registry_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=10
+        signing_key = _attempt_registry_lookup(registry_url, payload, unique_key_id)
+        if signing_key:
+            frappe.cache().set_value(cache_key, signing_key, expires_in_sec=3600)
+            return signing_key
+        
+        # Fallback: Try with BAP type
+        payload["type"] = "BAP"
+        signing_key = _attempt_registry_lookup(registry_url, payload, unique_key_id)
+        if signing_key:
+            frappe.cache().set_value(cache_key, signing_key, expires_in_sec=3600)
+            return signing_key
+        
+        # Second fallback: Try with BG type (Gateway)
+        payload["type"] = "BG"
+        signing_key = _attempt_registry_lookup(registry_url, payload, unique_key_id)
+        if signing_key:
+            frappe.cache().set_value(cache_key, signing_key, expires_in_sec=3600)
+            return signing_key
+        
+        frappe.log_error(
+            f"Public key not found in registry for {subscriber_id}|{unique_key_id} "
+            f"(tried minimal, BAP, BG lookups)",
+            "ONDC Registry Lookup"
         )
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Extract signing public key from response
-            if isinstance(data, list) and len(data) > 0:
-                for entry in data:
-                    if entry.get("ukId") == unique_key_id or entry.get("unique_key_id") == unique_key_id:
-                        return entry.get("signing_public_key")
-                # If no exact match, return first entry's key
-                return data[0].get("signing_public_key")
-            elif isinstance(data, dict):
-                return data.get("signing_public_key")
-        
-        # Cache miss - try local cache
-        cached_key = frappe.cache().get_value(f"ondc_pubkey:{subscriber_id}:{unique_key_id}")
-        if cached_key:
-            return cached_key
-        
         return None
     
     except Exception as e:
-        frappe.log_error(f"Registry lookup failed for {subscriber_id}: {str(e)}", "ONDC Registry")
-        
-        # Try local cache as fallback
-        cached_key = frappe.cache().get_value(f"ondc_pubkey:{subscriber_id}:{unique_key_id}")
+        frappe.log_error(
+            f"Registry lookup failed for {subscriber_id}|{unique_key_id}: {str(e)}",
+            "ONDC Registry"
+        )
+        # Try cache as last resort
+        cache_key = f"ondc_pubkey:{subscriber_id}:{unique_key_id}"
+        cached_key = frappe.cache().get_value(cache_key)
         if cached_key:
             return cached_key
-        
         return None
 
 
