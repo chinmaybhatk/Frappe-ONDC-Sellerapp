@@ -1355,6 +1355,28 @@ def trigger_merchant_cancel(order_id, cancellation_reason_id="003", cancelled_by
         except Exception:
             pass
 
+        # V23 FIX: If cache is empty (expired), reconstruct context from ONDC Order doc fields
+        # This prevents the context from being all-None when trigger_merchant_cancel is called
+        # after the Redis cache TTL has expired.
+        if not original_context.get("transaction_id"):
+            original_context = {
+                "domain": getattr(order, "domain", None) or settings.domain,
+                "country": "IND",
+                "city": getattr(order, "city", None) or settings.city or "std:080",
+                "core_version": "1.2.0",
+                "bap_id": order.bap_id,
+                "bap_uri": order.bap_uri,
+                "bpp_id": settings.subscriber_id,
+                "bpp_uri": settings.subscriber_url,
+                "transaction_id": order.transaction_id,
+                "message_id": order.message_id,
+                "action": "confirm",
+            }
+            frappe.log_error(
+                title="ONDC Merchant Cancel: Cache miss — rebuilt context from Order doc",
+                message=f"order_id={order_id}, transaction_id={order.transaction_id}"
+            )
+
         # Synthetic data dict for context reconstruction
         synthetic_data = {"context": original_context}
         context = client.create_context("on_cancel", original_context)
