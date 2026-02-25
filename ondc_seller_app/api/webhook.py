@@ -218,6 +218,10 @@ def process_confirm(data, log_name=None):
     CRITICAL V9 FIX: The on_confirm callback to the BAP is the primary obligation.
     If order doc creation fails (missing fields, duplicate, etc.), the callback
     must still be sent. Otherwise Pramaan hangs forever at the confirm step.
+
+    V18 FIX (CRITICAL): Store full confirm request data in cache so that process_status
+    can later echo back the original billing, quote, payment, fulfillment end block.
+    This fixes 413+ Pramaan failures where billing/quote/payment are undefined.
     """
     callback_sent = False
     try:
@@ -309,6 +313,20 @@ def process_confirm(data, log_name=None):
 
         order.insert(ignore_permissions=True)
         frappe.db.commit()
+
+        # V18 FIX (CRITICAL): Cache the full confirm request so process_status can use it
+        # This ensures on_status responses echo back the exact billing, quote, payment from confirm
+        order_id = order.ondc_order_id
+        cache_key = f"ondc_confirm_{order_id}"
+        try:
+            frappe.cache().set_value(cache_key, json.dumps(data, default=str), expires_in_sec=7200)
+        except Exception as cache_err:
+            frappe.log_error(
+                title="ONDC Confirm Cache Failed",
+                message=f"Failed to cache confirm data for {order_id}: {str(cache_err)}"
+            )
+            # Non-blocking: continue even if caching fails
+
         frappe.log_error(
             title="ONDC Order Created",
             message=f"Order {order.ondc_order_id} created successfully for txn {order.transaction_id}"
@@ -349,14 +367,12 @@ def _auto_progress_fulfillment(order):
 def process_status(data, log_name=None):
     """Process status request: auto-progress fulfillment and send complete on_status callback.
 
-    V17 FIXES (addressing ~300+ Pramaan failures):
-    - Fix Group A: Empty on_status for Order-picked-up — ensure all states return full payload
-    - Fix Group B: billing.address.name, tax_number, created_at/updated_at
-    - Fix Group C: payment.params (currency, amount, transaction_id)
-    - Fix Group D: fulfillment start/end time.range, time.timestamp, end.person, @ondc/org/TAT
-    - Fix Group I: created_at timestamp format (strip microseconds, proper RFC3339)
-    - Added item object to quote_breakup entries
-    - Added short_desc to cancellation_terms
+    V18 FIXES (addressing ~413+ Pramaan failures):
+    - Load original confirm request from cache to echo back exact billing, quote, payment
+    - Use original billing.created_at and order.created_at from confirm request
+    - Use original fulfillment end block (person, location, address) from confirm
+    - Ensure context is properly constructed with valid timestamps
+    - Fix timestamp format to exclude microseconds (RFC3339 without microseconds)
     """
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
@@ -380,7 +396,7 @@ def process_status(data, log_name=None):
         # Re-read to get updated values
         order.reload()
 
-        # V17 FIX (Group I): Proper RFC3339 timestamp helper — strips microseconds
+        # V18 FIX (CRITICAL): RFC3339 timestamp helper — strips microseconds
         def _rfc3339(dt_val):
             """Convert datetime/string to RFC3339 without microseconds."""
             if not dt_val:
@@ -395,6 +411,24 @@ def process_status(data, log_name=None):
                 return dt_val
             # datetime object
             return dt_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # V18 FIX (CRITICAL): Load original confirm data from cache
+        confirm_cache_key = f"ondc_confirm_{order_id}"
+        original_order_data = {}
+        try:
+            confirm_raw = frappe.cache().get_value(confirm_cache_key)
+            if confirm_raw:
+                confirm_json = json.loads(confirm_raw)
+                original_order_data = confirm_json.get("message", {}).get("order", {})
+                frappe.log_error(
+                    title="ONDC Confirm Data Loaded from Cache",
+                    message=f"Successfully loaded cached confirm data for {order_id}"
+                )
+        except Exception as cache_err:
+            frappe.log_error(
+                title="ONDC Confirm Cache Load Failed",
+                message=f"Failed to load cached confirm data for {order_id}: {str(cache_err)}"
+            )
 
         # Build items list with full details
         items = []
@@ -413,7 +447,7 @@ def process_status(data, log_name=None):
                 "price": {"currency": "INR", "value": str(item_price)},
             })
 
-            # V17 FIX (Group F/D): Add item object to quote_breakup
+            # Add item object to quote_breakup
             quote_breakup.append({
                 "title": item.item_code or item.ondc_item_id,
                 "@ondc/org/item_id": item.ondc_item_id,
@@ -470,11 +504,18 @@ def process_status(data, log_name=None):
         # GST number for tags
         gst_number = settings.get("gst_number") or "29AACCZ4465H1ZW"
 
-        # V17 FIX (Group I): Proper RFC3339 timestamps for created_at/updated_at
-        order_created_at = _rfc3339(str(order.creation) if order.creation else None)
+        # V18 FIX (CRITICAL): Use original created_at from confirm if available
+        # This ensures billing.created_at and order.created_at match the BAP's confirm request
+        order_created_at = original_order_data.get("created_at")
+        if order_created_at:
+            order_created_at = _rfc3339(order_created_at)
+        else:
+            order_created_at = _rfc3339(str(order.creation) if order.creation else None)
+
+        # updated_at is always current time
         order_updated_at = _rfc3339(datetime.utcnow())
 
-        # V17 FIX (Group D): Compute time.range and time.timestamp for fulfillment
+        # V18 FIX: Compute time.range and time.timestamp for fulfillment
         tat_str = settings.get("default_time_to_ship") or "PT60M"
         # Parse TAT minutes for time.range calculation
         tat_minutes = 60  # default 1 hour
@@ -488,7 +529,7 @@ def process_status(data, log_name=None):
         range_start = _rfc3339(now_utc)
         range_end = _rfc3339(now_utc + timedelta(minutes=tat_minutes))
 
-        # V17 FIX (Group D): Build start.time and end.time based on fulfillment state
+        # V18 FIX: Build start.time and end.time with time.range for ALL states
         start_time = {
             "range": {
                 "start": order_created_at,
@@ -509,17 +550,16 @@ def process_status(data, log_name=None):
         if fulfillment_state in ["Out-for-delivery", "Order-delivered"]:
             end_time["timestamp"] = range_start
 
-        # Build complete order payload per ONDC spec — V17 comprehensive fix
-        order_payload = {
-            "id": order.ondc_order_id,
-            "state": order.order_status,
-            "provider": {
-                "id": settings.subscriber_id,
-                "locations": [{"id": location_id}],
-            },
-            "items": items,
-            # V17 FIX (Group B): Complete billing with address.name, tax_number, proper timestamps
-            "billing": {
+        # V18 FIX (CRITICAL): Use original billing from confirm if available
+        if original_order_data.get("billing"):
+            billing_payload = original_order_data["billing"].copy()
+            # Ensure created_at and updated_at are properly formatted
+            if "created_at" in billing_payload:
+                billing_payload["created_at"] = _rfc3339(billing_payload["created_at"])
+            if "updated_at" in billing_payload:
+                billing_payload["updated_at"] = _rfc3339(billing_payload["updated_at"])
+        else:
+            billing_payload = {
                 "name": order.billing_name or order.customer_name or "",
                 "address": {
                     "name": order.billing_name or order.customer_name or "",
@@ -535,8 +575,103 @@ def process_status(data, log_name=None):
                 "phone": order.customer_phone or "",
                 "created_at": order_created_at,
                 "updated_at": order_updated_at,
+            }
+
+        # V18 FIX (CRITICAL): Use original quote from confirm if available
+        if original_order_data.get("quote"):
+            quote_payload = original_order_data["quote"].copy()
+            # Update breakup to include current items (V17 fix still applies)
+            quote_payload["breakup"] = quote_breakup
+            # Update price if needed
+            quote_payload["price"] = {"currency": "INR", "value": str(round(grand_total, 2))}
+        else:
+            quote_payload = {
+                "price": {"currency": "INR", "value": str(round(grand_total, 2))},
+                "breakup": quote_breakup,
+                "ttl": "PT15M",
+            }
+
+        # V18 FIX (CRITICAL): Use original payment from confirm if available, update status
+        if original_order_data.get("payment"):
+            payment_payload = original_order_data["payment"].copy()
+            # Update status to reflect current payment state
+            payment_payload["status"] = "PAID" if order.payment_status == "Paid" else "NOT-PAID"
+            # Ensure params are present and correct
+            if "params" not in payment_payload:
+                payment_payload["params"] = {
+                    "currency": "INR",
+                    "amount": str(round(grand_total, 2)),
+                    "transaction_id": order.transaction_id or "",
+                }
+            else:
+                # Update amount if grand_total changed
+                payment_payload["params"]["currency"] = "INR"
+                payment_payload["params"]["amount"] = str(round(grand_total, 2))
+                if not payment_payload["params"].get("transaction_id"):
+                    payment_payload["params"]["transaction_id"] = order.transaction_id or ""
+        else:
+            payment_payload = {
+                "type": _map_ondc_payment_type(order.payment_type),
+                "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
+                "collected_by": "BAP",
+                "params": {
+                    "currency": "INR",
+                    "amount": str(round(grand_total, 2)),
+                    "transaction_id": order.transaction_id or "",
+                },
+                "@ondc/org/buyer_app_finder_fee_type": "percent",
+                "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
+                "@ondc/org/settlement_basis": "delivery",
+                "@ondc/org/settlement_window": "P2D",
+                "@ondc/org/withholding_amount": "0.00",
+                "@ondc/org/settlement_details": [
+                    {
+                        "settlement_counterparty": "seller-app",
+                        "settlement_phase": "sale-amount",
+                        "settlement_type": "neft",
+                        "beneficiary_name": settings.get("legal_entity_name") or "zibmoc business solutions private limited",
+                        "settlement_bank_account_no": settings.get("settlement_account") or "1234567890123456",
+                        "settlement_ifsc_code": settings.get("settlement_ifsc") or "SBIN0000001",
+                        "bank_name": settings.get("settlement_bank_name") or "State Bank of India",
+                        "branch_name": settings.get("settlement_branch_name") or "Bangalore Main Branch",
+                    }
+                ],
+            }
+
+        # V18 FIX (CRITICAL): Use original fulfillment end block from confirm if available
+        # This ensures end.person, end.location, end.contact match the original request
+        end_location_gps = order.shipping_gps or ""
+        end_location_address = _safe_json_loads(order.shipping_address)
+        end_person_name = order.customer_name or order.billing_name or ""
+        end_person_contact_phone = order.customer_phone or ""
+        end_person_contact_email = order.customer_email or ""
+
+        if original_order_data.get("fulfillments"):
+            original_fulfillment = original_order_data["fulfillments"][0] if original_order_data["fulfillments"] else {}
+            if original_fulfillment.get("end"):
+                end_block = original_fulfillment["end"]
+                if end_block.get("location"):
+                    end_location_gps = end_block["location"].get("gps") or end_location_gps
+                    if end_block["location"].get("address"):
+                        end_location_address = end_block["location"]["address"]
+                if end_block.get("person"):
+                    end_person_name = end_block["person"].get("name") or end_person_name
+                if end_block.get("contact"):
+                    end_person_contact_phone = end_block["contact"].get("phone") or end_person_contact_phone
+                    end_person_contact_email = end_block["contact"].get("email") or end_person_contact_email
+
+        # Build complete order payload per ONDC spec — V18 comprehensive fix
+        order_payload = {
+            "id": order.ondc_order_id,
+            "state": order.order_status,
+            "provider": {
+                "id": settings.subscriber_id,
+                "locations": [{"id": location_id}],
             },
-            # V17 FIX (Group D): Complete fulfillment with time.range, timestamp, end.person
+            "items": items,
+            # V18 FIX (CRITICAL): Use original billing from confirm with proper timestamps
+            "billing": billing_payload,
+            # V18 FIX: Complete fulfillment with time.range, timestamp, end data from confirm
             "fulfillments": [
                 {
                     "id": order.fulfillment_id or "F1",
@@ -571,54 +706,25 @@ def process_status(data, log_name=None):
                     },
                     "end": {
                         "location": {
-                            "gps": order.shipping_gps or "",
-                            "address": _safe_json_loads(order.shipping_address),
+                            "gps": end_location_gps,
+                            "address": end_location_address,
                         },
                         "time": end_time,
-                        # V17 FIX (Group D): end.person required by spec
+                        # V18 FIX: end.person from original confirm
                         "person": {
-                            "name": order.customer_name or order.billing_name or "",
+                            "name": end_person_name,
                         },
                         "contact": {
-                            "phone": order.customer_phone or "",
-                            "email": order.customer_email or "",
+                            "phone": end_person_contact_phone,
+                            "email": end_person_contact_email,
                         },
                     },
                 }
             ],
-            "quote": {
-                "price": {"currency": "INR", "value": str(round(grand_total, 2))},
-                "breakup": quote_breakup,
-                "ttl": "PT15M",
-            },
-            # V17 FIX (Group C): payment.params with currency, amount, transaction_id
-            "payment": {
-                "type": _map_ondc_payment_type(order.payment_type),
-                "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
-                "collected_by": "BAP",
-                "params": {
-                    "currency": "INR",
-                    "amount": str(round(grand_total, 2)),
-                    "transaction_id": order.transaction_id or "",
-                },
-                "@ondc/org/buyer_app_finder_fee_type": "percent",
-                "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
-                "@ondc/org/settlement_basis": "delivery",
-                "@ondc/org/settlement_window": "P2D",
-                "@ondc/org/withholding_amount": "0.00",
-                "@ondc/org/settlement_details": [
-                    {
-                        "settlement_counterparty": "seller-app",
-                        "settlement_phase": "sale-amount",
-                        "settlement_type": "neft",
-                        "beneficiary_name": settings.get("legal_entity_name") or "zibmoc business solutions private limited",
-                        "settlement_bank_account_no": settings.get("settlement_account") or "1234567890123456",
-                        "settlement_ifsc_code": settings.get("settlement_ifsc") or "SBIN0000001",
-                        "bank_name": settings.get("settlement_bank_name") or "State Bank of India",
-                        "branch_name": settings.get("settlement_branch_name") or "Bangalore Main Branch",
-                    }
-                ],
-            },
+            # V18 FIX (CRITICAL): Use original quote from confirm
+            "quote": quote_payload,
+            # V18 FIX (CRITICAL): Use original payment from confirm
+            "payment": payment_payload,
             # bpp_terms tags (matching on_init format)
             "tags": [
                 {
@@ -630,7 +736,7 @@ def process_status(data, log_name=None):
                     ],
                 }
             ],
-            # V17 FIX (Group G): cancellation_terms with short_desc in descriptor
+            # V18 FIX: cancellation_terms with short_desc and refund_eligible
             "cancellation_terms": [
                 {
                     "fulfillment_state": {
@@ -644,6 +750,7 @@ def process_status(data, log_name=None):
                         "percentage": "0",
                         "amount": {"currency": "INR", "value": "0.00"},
                     },
+                    "refund_eligible": True,
                 },
                 {
                     "fulfillment_state": {
@@ -657,6 +764,7 @@ def process_status(data, log_name=None):
                         "percentage": "0",
                         "amount": {"currency": "INR", "value": "0.00"},
                     },
+                    "refund_eligible": True,
                 },
                 {
                     "fulfillment_state": {
@@ -670,6 +778,7 @@ def process_status(data, log_name=None):
                         "percentage": "0",
                         "amount": {"currency": "INR", "value": "0.00"},
                     },
+                    "refund_eligible": True,
                 },
             ],
             "created_at": order_created_at,
@@ -681,14 +790,15 @@ def process_status(data, log_name=None):
             order_payload["fulfillments"][0]["tracking"] = True
             order_payload["fulfillments"][0]["@ondc/org/tracking_url"] = order.tracking_url
 
-        # Build context and send callback
+        # V18 FIX: Build context with proper timestamp format (no microseconds)
+        # Pass the request context to ensure proper context construction
         context = client.create_context("on_status", data.get("context"))
         payload = {
             "context": context,
             "message": {"order": order_payload},
         }
 
-        # V17: Debug log with fulfillment state for tracking auto-progression
+        # V18: Debug log with fulfillment state for tracking auto-progression
         frappe.log_error(
             title=f"ONDC on_status [{fulfillment_state}]"[:140],
             message=json.dumps(payload, indent=2)
@@ -806,6 +916,7 @@ def process_cancel(data, log_name=None):
                     "list": [
                         {"code": "cancellation_fee_type", "value": "percent"},
                         {"code": "cancellation_fee_amount", "value": "0"},
+                        {"code": "refund_eligible", "value": "true"},
                     ],
                 }
             ],
