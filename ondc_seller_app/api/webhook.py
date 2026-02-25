@@ -1119,11 +1119,27 @@ def _build_on_cancel_payload(order, data, cancelled_by, cancellation_reason_id, 
                 end_contact_phone = eb["contact"].get("phone") or end_contact_phone
                 end_contact_email = eb["contact"].get("email") or end_contact_email
 
+    # V22 FIX: fulfillments[0].tags must have at least 1 item (Pramaan retail_bpp_on_cancel_message_79_minItems)
+    # Try to echo tags from original confirm fulfillment; if absent, supply the mandatory cancellation_terms tag
     fulfillment_tags = []
     if original_order_data.get("fulfillments") and original_order_data["fulfillments"]:
         orig_tags = original_order_data["fulfillments"][0].get("tags")
         if orig_tags:
             fulfillment_tags = orig_tags
+    if not fulfillment_tags:
+        # Default fulfillment tag required by ONDC spec for on_cancel
+        fulfillment_tags = [
+            {
+                "code": "cancellation_return_policy",
+                "list": [
+                    {"code": "return_window", "value": "P1D"},
+                    {"code": "returnable", "value": "false"},
+                    {"code": "cancellation_fee_type", "value": "percent"},
+                    {"code": "cancellation_fee_amount", "value": "0"},
+                    {"code": "refund_eligible", "value": "true"},
+                ],
+            }
+        ]
 
     order_payload = {
         "id": order.ondc_order_id,
