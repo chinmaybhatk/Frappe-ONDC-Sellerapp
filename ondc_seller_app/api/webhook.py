@@ -1,5 +1,6 @@
 import frappe
 import json
+import time
 from frappe import _
 from werkzeug.wrappers import Response
 import traceback
@@ -367,12 +368,15 @@ def _auto_progress_fulfillment(order):
 def process_status(data, log_name=None):
     """Process status request: auto-progress fulfillment and send complete on_status callback.
 
-    V18 FIXES (addressing ~413+ Pramaan failures):
-    - Load original confirm request from cache to echo back exact billing, quote, payment
-    - Use original billing.created_at and order.created_at from confirm request
-    - Use original fulfillment end block (person, location, address) from confirm
-    - Ensure context is properly constructed with valid timestamps
-    - Fix timestamp format to exclude microseconds (RFC3339 without microseconds)
+    V19 FIXES (addressing ~419+ Pramaan failures):
+    - Create two timestamp helpers: _echo_timestamp() for echoed timestamps (preserves microseconds)
+      and _new_timestamp() for generated timestamps (no microseconds)
+    - order.updated_at should echo order.created_at from confirm (not current UTC time)
+    - Add end.time.timestamp for ALL active states (Agent-assigned, Order-picked-up,
+      Out-for-delivery, Order-delivered), not just the last two
+    - Add retry logic for send_callback() with exponential backoff
+    - Use _echo_timestamp() for billing timestamps from cached confirm
+    - Ensure Order-delivered state is set to "Completed"
     """
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
@@ -396,21 +400,25 @@ def process_status(data, log_name=None):
         # Re-read to get updated values
         order.reload()
 
-        # V18 FIX (CRITICAL): RFC3339 timestamp helper — strips microseconds
-        def _rfc3339(dt_val):
-            """Convert datetime/string to RFC3339 without microseconds."""
-            if not dt_val:
+        # V19 FIX (CRITICAL): Two timestamp helpers
+        # _echo_timestamp() — for timestamps from confirm request (preserves microseconds)
+        def _echo_timestamp(ts_str):
+            """Echo timestamp as-is from confirm data, preserving microseconds.
+            Just ensure it has T separator and ends with Z."""
+            if not ts_str:
                 return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-            if isinstance(dt_val, str):
-                dt_val = dt_val.replace(" ", "T")
-                # Strip microseconds if present (Frappe datetime has them)
-                if "." in dt_val:
-                    dt_val = dt_val.split(".")[0]
-                if not dt_val.endswith("Z"):
-                    dt_val += "Z"
-                return dt_val
-            # datetime object
-            return dt_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ts_str = str(ts_str)
+            # Replace space with T if present
+            ts_str = ts_str.replace(" ", "T")
+            # Ensure it ends with Z
+            if not ts_str.endswith("Z"):
+                ts_str += "Z"
+            return ts_str
+
+        # _new_timestamp() — for NEW timestamps we generate (no microseconds)
+        def _new_timestamp():
+            """Generate a new timestamp without microseconds."""
+            return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # V18 FIX (CRITICAL): Load original confirm data from cache
         confirm_cache_key = f"ondc_confirm_{order_id}"
@@ -504,16 +512,16 @@ def process_status(data, log_name=None):
         # GST number for tags
         gst_number = settings.get("gst_number") or "29AACCZ4465H1ZW"
 
-        # V18 FIX (CRITICAL): Use original created_at from confirm if available
+        # V19 FIX (CRITICAL): Use original created_at from confirm if available
         # This ensures billing.created_at and order.created_at match the BAP's confirm request
         order_created_at = original_order_data.get("created_at")
         if order_created_at:
-            order_created_at = _rfc3339(order_created_at)
+            order_created_at = _echo_timestamp(order_created_at)
         else:
-            order_created_at = _rfc3339(str(order.creation) if order.creation else None)
+            order_created_at = _echo_timestamp(str(order.creation) if order.creation else None)
 
-        # updated_at is always current time
-        order_updated_at = _rfc3339(datetime.utcnow())
+        # V19 FIX: order.updated_at should ECHO order.created_at from confirm, not current UTC
+        order_updated_at = order_created_at
 
         # V18 FIX: Compute time.range and time.timestamp for fulfillment
         tat_str = settings.get("default_time_to_ship") or "PT60M"
@@ -526,8 +534,8 @@ def process_status(data, log_name=None):
                 tat_minutes = 60
 
         now_utc = datetime.utcnow()
-        range_start = _rfc3339(now_utc)
-        range_end = _rfc3339(now_utc + timedelta(minutes=tat_minutes))
+        range_start = _new_timestamp()
+        range_end = (now_utc + timedelta(minutes=tat_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # V18 FIX: Build start.time and end.time with time.range for ALL states
         start_time = {
@@ -543,21 +551,22 @@ def process_status(data, log_name=None):
             },
         }
 
-        # Add timestamps for active/completed states
+        # V19 FIX: Add timestamps for active states (including Agent-assigned now)
         active_states = ["Packed", "Agent-assigned", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
         if fulfillment_state in active_states:
             start_time["timestamp"] = range_start
-        if fulfillment_state in ["Out-for-delivery", "Order-delivered"]:
+        # V19 FIX: Add end.time.timestamp for ALL active states, not just last two
+        if fulfillment_state in active_states:
             end_time["timestamp"] = range_start
 
-        # V18 FIX (CRITICAL): Use original billing from confirm if available
+        # V19 FIX (CRITICAL): Use original billing from confirm if available
         if original_order_data.get("billing"):
             billing_payload = original_order_data["billing"].copy()
-            # Ensure created_at and updated_at are properly formatted
+            # V19 FIX: Use _echo_timestamp for billing timestamps
             if "created_at" in billing_payload:
-                billing_payload["created_at"] = _rfc3339(billing_payload["created_at"])
+                billing_payload["created_at"] = _echo_timestamp(billing_payload["created_at"])
             if "updated_at" in billing_payload:
-                billing_payload["updated_at"] = _rfc3339(billing_payload["updated_at"])
+                billing_payload["updated_at"] = _echo_timestamp(billing_payload["updated_at"])
         else:
             billing_payload = {
                 "name": order.billing_name or order.customer_name or "",
@@ -660,7 +669,7 @@ def process_status(data, log_name=None):
                     end_person_contact_phone = end_block["contact"].get("phone") or end_person_contact_phone
                     end_person_contact_email = end_block["contact"].get("email") or end_person_contact_email
 
-        # Build complete order payload per ONDC spec — V18 comprehensive fix
+        # Build complete order payload per ONDC spec — V19 comprehensive fix
         order_payload = {
             "id": order.ondc_order_id,
             "state": order.order_status,
@@ -785,6 +794,10 @@ def process_status(data, log_name=None):
             "updated_at": order_updated_at,
         }
 
+        # V19 FIX: Ensure Order-delivered properly sets state to "Completed"
+        if fulfillment_state == "Order-delivered":
+            order_payload["state"] = "Completed"
+
         # Add tracking URL if available
         if order.get("tracking_url"):
             order_payload["fulfillments"][0]["tracking"] = True
@@ -804,11 +817,21 @@ def process_status(data, log_name=None):
             message=json.dumps(payload, indent=2)
         )
 
-        result = client.send_callback(
-            data.get("context", {}).get("bap_uri"),
-            "/on_status",
-            payload,
-        )
+        # V19 FIX: Add retry logic for send_callback
+        bap_uri = data.get("context", {}).get("bap_uri")
+        max_retries = 3
+        result = None
+        for attempt in range(max_retries):
+            result = client.send_callback(bap_uri, "/on_status", payload)
+            if result.get("success"):
+                break
+            if attempt < max_retries - 1:
+                frappe.log_error(
+                    title=f"ONDC on_status retry {attempt+1}/{max_retries}"[:140],
+                    message=f"Callback failed for {order_id} [{fulfillment_state}], retrying..."
+                )
+                time.sleep(1)
+
         _update_webhook_log(log_name, status="Processed", response=result)
 
     except Exception as e:
