@@ -13,6 +13,22 @@ import nacl.encoding
 from datetime import datetime
 
 
+def _safe_log_error(title, message):
+    """
+    V14 FIX: Safe wrapper for frappe.log_error that prevents
+    CharacterLengthExceededError by truncating title to 140 chars.
+    Frappe's Error Log 'method' field has a 140-char max.
+    """
+    try:
+        frappe.log_error(
+            title=str(title)[:140],
+            message=str(message)
+        )
+    except Exception:
+        # Last resort: if even truncated log fails, silently pass
+        pass
+
+
 def verify_request(request_data, auth_header=None, gateway_auth_header=None):
     """
     Verify incoming ONDC request signature.
@@ -89,7 +105,11 @@ def verify_request(request_data, auth_header=None, gateway_auth_header=None):
             return False, f"Signature verification error: {str(e)}"
     
     except Exception as e:
-        frappe.log_error(f"Auth verification error: {str(e)}", "ONDC Auth")
+        # V14 FIX: Use _safe_log_error to prevent CharacterLengthExceededError
+        _safe_log_error(
+            "ONDC Auth Error",
+            f"Auth verification error: {str(e)}"
+        )
         return False, f"Authentication error: {str(e)}"
 
 
@@ -185,6 +205,9 @@ def lookup_public_key(subscriber_id, unique_key_id):
     gateway keys (BG type) and cross-domain lookups always work.
     Falls back to typed lookups if minimal fails. Caches results for 1 hour.
     
+    V14 FIX: All log_error calls use _safe_log_error() to prevent
+    CharacterLengthExceededError when subscriber_id is long (e.g. Pramaan).
+    
     Args:
         subscriber_id: The subscriber's FQDN
         unique_key_id: The unique key identifier
@@ -236,17 +259,19 @@ def lookup_public_key(subscriber_id, unique_key_id):
             frappe.cache().set_value(cache_key, signing_key, expires_in_sec=3600)
             return signing_key
         
-        frappe.log_error(
+        # V14 FIX: Use _safe_log_error to prevent CharacterLengthExceededError
+        _safe_log_error(
+            "ONDC Registry Lookup",
             f"Public key not found in registry for {subscriber_id}|{unique_key_id} "
-            f"(tried minimal, BAP, BG lookups)",
-            "ONDC Registry Lookup"
+            f"(tried minimal, BAP, BG lookups)"
         )
         return None
     
     except Exception as e:
-        frappe.log_error(
-            f"Registry lookup failed for {subscriber_id}|{unique_key_id}: {str(e)}",
-            "ONDC Registry"
+        # V14 FIX: Use _safe_log_error to prevent CharacterLengthExceededError
+        _safe_log_error(
+            "ONDC Registry Error",
+            f"Registry lookup failed for {subscriber_id}|{unique_key_id}: {str(e)}"
         )
         # Try cache as last resort
         cache_key = f"ondc_pubkey:{subscriber_id}:{unique_key_id}"
