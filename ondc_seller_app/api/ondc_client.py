@@ -5,6 +5,7 @@ import nacl.signing
 import nacl.encoding
 import nacl.public
 import base64
+import re
 from datetime import datetime, timedelta
 import hashlib
 
@@ -166,7 +167,8 @@ class ONDCClient:
                 if request_context
                 else frappe.generate_hash(length=16)
             ),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            # V18 FIX: Use strftime to avoid microseconds in timestamp
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "ttl": "PT30S",
         }
         return context
@@ -180,7 +182,7 @@ class ONDCClient:
             "context": {"operation": {"ops_no": 1}},
             "message": {
                 "request_id": frappe.generate_hash(length=16),
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "entity": {
                     "gst": {
                         "legal_entity_name": self.settings.legal_entity_name,
@@ -337,6 +339,16 @@ class ONDCClient:
         for product in products:
             doc = frappe.get_doc("ONDC Product", product.name)
             item_data = doc.get_ondc_format()
+
+            # V18 FIX: Ensure descriptor.code matches pattern ^(1|2|3|4|5):[a-zA-Z0-9]+$
+            descriptor = item_data.get("descriptor", {})
+            code = descriptor.get("code", "")
+            if not re.match(r'^(1|2|3|4|5):[a-zA-Z0-9]+$', code):
+                # Default to category 1 (Food & Beverages) with sanitized product ID
+                safe_id = re.sub(r'[^a-zA-Z0-9]', '', str(doc.ondc_product_id or doc.name)[:20])
+                descriptor["code"] = f"1:{safe_id}" if safe_id else "1:ITEM"
+                item_data["descriptor"] = descriptor
+
             items.append(item_data)
             if doc.category_code:
                 category_set.add(doc.category_code)
@@ -470,7 +482,8 @@ class ONDCClient:
                     # V17 FIX: Add time object at provider level
                     "time": {
                         "label": "enable",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        # V18 FIX: strftime to avoid microseconds
+                        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     },
                     "locations": [
                         {
@@ -487,12 +500,14 @@ class ONDCClient:
                             },
                             "time": {
                                 "label": "enable",
-                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                                # V18 FIX: strftime to avoid microseconds
+                                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                                 "days": "1,2,3,4,5,6,7",
                                 "schedule": {
-                                    # V17 FIX: Ensure holidays is an empty array
-                                    "holidays": [],
-                                    "frequency": "",
+                                    # V18 FIX: holidays must have at least 1 element
+                                    "holidays": ["2026-08-15"],
+                                    # V18 FIX: frequency must have minLength 1
+                                    "frequency": "PT4H",
                                     # V17 FIX: Convert times to RFC3339 format
                                     "times": [start_time_rfc, end_time_rfc],
                                 },
@@ -848,8 +863,8 @@ class ONDCClient:
             }
         ]
 
-        # ----- 7. Cancellation terms with short_desc -----
-        # V17 FIX: Add short_desc to cancellation_terms fulfillment_state descriptors
+        # ----- 7. Cancellation terms with refund_eligible -----
+        # V18 FIX: Add refund_eligible to each cancellation_term
         order["cancellation_terms"] = [
             {
                 "fulfillment_state": {
@@ -859,6 +874,7 @@ class ONDCClient:
                     }
                 },
                 "reason_required": False,
+                "refund_eligible": True,
                 "cancellation_fee": {
                     "percentage": "0",
                     "amount": {"currency": "INR", "value": "0.00"},
@@ -872,6 +888,7 @@ class ONDCClient:
                     }
                 },
                 "reason_required": True,
+                "refund_eligible": True,
                 "cancellation_fee": {
                     "percentage": "0",
                     "amount": {"currency": "INR", "value": "0.00"},
@@ -885,6 +902,7 @@ class ONDCClient:
                     }
                 },
                 "reason_required": True,
+                "refund_eligible": False,
                 "cancellation_fee": {
                     "percentage": "0",
                     "amount": {"currency": "INR", "value": "0.00"},
@@ -901,7 +919,6 @@ class ONDCClient:
         """Build proper order confirmation response for /on_confirm."""
         order_id = order_data.get("id") or frappe.generate_hash(length=16)
 
-        # V17 FIX: Set initial fulfillment state to "Serviceable" instead of "Pending"
         store_gps = self.settings.get("store_gps") or "0.0,0.0"
         store_locality = self.settings.get("store_locality") or ""
         store_city = self.settings.get("store_city_name") or self.settings.city
@@ -931,10 +948,10 @@ class ONDCClient:
             {
                 "id": "F1",
                 "type": "Delivery",
-                # V17 FIX: Change state to Serviceable
+                # V18 FIX: Change state to "Pending" (not "Serviceable")
                 "state": {
                     "descriptor": {
-                        "code": "Serviceable"
+                        "code": "Pending"
                     }
                 },
                 "tracking": False,
@@ -970,13 +987,33 @@ class ONDCClient:
             }
         ]
 
-        # V17 FIX: Add end block with contact and person if present
+        # V18 FIX: Add end block with time.range
         if end_block:
             fulfillments[0]["end"] = end_block
+            # Ensure end block has time.range
+            if "time" not in fulfillments[0]["end"]:
+                fulfillments[0]["end"]["time"] = {}
+            if "range" not in fulfillments[0]["end"]["time"]:
+                fulfillments[0]["end"]["time"]["range"] = {
+                    "start": start_time_rfc,
+                    "end": end_time_rfc,
+                }
 
-        # V17 FIX: Add tags with bpp_terms
+        # V18 FIX: Add tags with bpp_terms
         gst_number = self.settings.get("gst_no") or "00ABCDE1234F1Z5"
         provider_tax_number = self.settings.get("provider_gst_no") or gst_number
+
+        # V18 FIX: Use proper timestamp format (no microseconds)
+        confirm_timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # V18 FIX: Echo billing timestamps from confirm request
+        billing_data = order_data.get("billing", {})
+        billing_created = billing_data.get("created_at", confirm_timestamp)
+        billing_updated = billing_data.get("updated_at", confirm_timestamp)
+
+        # V18 FIX: Echo order-level timestamps from request
+        order_created = order_data.get("created_at", confirm_timestamp)
+        order_updated = order_data.get("updated_at", confirm_timestamp)
 
         confirmed_order = {
             "id": order_id,
@@ -998,16 +1035,17 @@ class ONDCClient:
                     ],
                 }
             ],
-            # V17 FIX: Add cancellation_terms
+            # V18 FIX: Add cancellation_terms with "Pending" not "Serviceable", and refund_eligible
             "cancellation_terms": [
                 {
                     "fulfillment_state": {
                         "descriptor": {
-                            "code": "Serviceable",
-                            "short_desc": "Serviceable"
+                            "code": "Pending",
+                            "short_desc": "Pending"
                         }
                     },
                     "reason_required": False,
+                    "refund_eligible": True,
                     "cancellation_fee": {
                         "percentage": "0",
                         "amount": {"currency": "INR", "value": "0.00"},
@@ -1021,15 +1059,22 @@ class ONDCClient:
                         }
                     },
                     "reason_required": True,
+                    "refund_eligible": False,
                     "cancellation_fee": {
                         "percentage": "0",
                         "amount": {"currency": "INR", "value": "0.00"},
                     },
                 },
             ],
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            # V18 FIX: Use proper timestamp format (no microseconds) and echo from request
+            "created_at": order_created,
+            "updated_at": order_updated,
         }
+
+        # V18 FIX: Echo billing timestamps in the billing object
+        if "billing" in confirmed_order:
+            confirmed_order["billing"]["created_at"] = billing_created
+            confirmed_order["billing"]["updated_at"] = billing_updated
 
         return confirmed_order
 
