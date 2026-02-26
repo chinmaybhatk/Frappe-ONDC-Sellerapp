@@ -135,7 +135,18 @@ def process_search(data):
 
 
 def build_catalog(intent, settings):
-    """Build catalog from Frappe items."""
+    """Build catalog from Frappe items.
+
+    V26: Fixed all 5 FullOnSearchRequest schema validation errors:
+      1. bpp/providers[0].time — added operating hours time block
+      2. bpp/providers[0].fulfillments[0].contact — added contact field
+      3. bpp/providers[0].fulfillments[1].contact — added contact field
+      4. bpp/providers[0].locations[0].time.range.start — ISO 8601 datetime
+      5. bpp/providers[0].locations[0].time.range.end — ISO 8601 datetime
+
+    The ONDC FullOnSearchRequest schema expects catalog items nested under
+    bpp/providers[] with time, fulfillments (with contact), and locations.
+    """
     try:
         items = frappe.get_all(
             "Item",
@@ -185,19 +196,101 @@ def build_catalog(intent, settings):
             }
             catalog_items.append(catalog_item)
 
+        # V26: ISO 8601 datetime strings for location time range
+        # Use a fixed reference date (today) with the open/close times
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        range_start = f"{today_str}T08:00:00.000Z"
+        range_end = f"{today_str}T22:00:00.000Z"
+
+        now_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # V26: Fulfillment contact — required by FullOnSearchRequest schema
+        fulfillment_contact = {
+            "phone": "+919999999999",
+            "email": "support@waluelab.com"
+        }
+
+        provider_id = settings.subscriber_id if hasattr(settings, 'subscriber_id') and settings.subscriber_id else "ondc.waluelab.com"
+
         return {
             "bpp/descriptor": {
                 "name": settings.company or "WalueLab Store",
-                "symbol": settings.logo_url if hasattr(settings, 'logo_url') else "",
+                "symbol": settings.logo_url if hasattr(settings, 'logo_url') and settings.logo_url else "",
                 "short_desc": "Online Grocery Store",
                 "long_desc": "Fresh groceries delivered to your doorstep",
                 "images": []
             },
+            # V26: bpp/providers array — required by FullOnSearchRequest schema
+            # All provider-level fields (time, fulfillments, locations, items, categories)
+            # must be nested here for Pramaan validation to pass.
+            "bpp/providers": [
+                {
+                    "id": provider_id,
+                    "descriptor": {
+                        "name": settings.company or "WalueLab Store",
+                        "short_desc": "Online Grocery Store",
+                        "long_desc": "Fresh groceries delivered to your doorstep",
+                        "images": []
+                    },
+                    # V26 Fix 1: provider-level time (operating schedule)
+                    "time": {
+                        "label": "enable",
+                        "timestamp": now_ts,
+                        "days": "1,2,3,4,5,6,7",
+                        "schedule": {
+                            "holidays": []
+                        },
+                        "range": {
+                            "start": range_start,
+                            "end": range_end
+                        }
+                    },
+                    "ttl": "P1D",
+                    # V26 Fix 2 & 3: fulfillments with contact field
+                    "fulfillments": [
+                        {
+                            "id": "1",
+                            "type": "Delivery",
+                            "@ondc/org/category": "Immediate Delivery",
+                            "contact": fulfillment_contact
+                        }
+                    ],
+                    # V26 Fix 4 & 5: locations with ISO 8601 datetime range
+                    "locations": [
+                        {
+                            "id": "L1",
+                            "time": {
+                                "label": "enable",
+                                "timestamp": now_ts,
+                                "days": "1,2,3,4,5,6,7",
+                                "schedule": {
+                                    "holidays": []
+                                },
+                                "range": {
+                                    "start": range_start,
+                                    "end": range_end
+                                }
+                            }
+                        }
+                    ],
+                    "categories": [
+                        {
+                            "id": "Grocery",
+                            "descriptor": {
+                                "name": "Grocery"
+                            }
+                        }
+                    ],
+                    "items": catalog_items,
+                    "offers": []
+                }
+            ],
             "bpp/fulfillments": [
                 {
                     "id": "1",
                     "type": "Delivery",
-                    "@ondc/org/category": "Immediate Delivery"
+                    "@ondc/org/category": "Immediate Delivery",
+                    "contact": fulfillment_contact
                 }
             ],
             "bpp/locations": [
@@ -205,14 +298,14 @@ def build_catalog(intent, settings):
                     "id": "L1",
                     "time": {
                         "label": "enable",
-                        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "timestamp": now_ts,
                         "days": "1,2,3,4,5,6,7",
                         "schedule": {
                             "holidays": []
                         },
                         "range": {
-                            "start": "0800",
-                            "end": "2200"
+                            "start": range_start,
+                            "end": range_end
                         }
                     }
                 }
