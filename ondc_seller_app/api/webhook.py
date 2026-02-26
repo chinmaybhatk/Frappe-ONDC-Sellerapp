@@ -1309,6 +1309,7 @@ def process_cancel(data, log_name=None):
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
 
 
+@frappe.whitelist()
 def trigger_merchant_cancel(order_id, cancellation_reason_id="003", cancelled_by_bpp=True):
     """V21: Flow 3C — Merchant/seller-initiated unsolicited on_cancel.
 
