@@ -134,7 +134,12 @@ class ONDCClient:
     # Context
     # -----------------------------------------------------------------------
     def create_context(self, action, request_context=None):
-        """Create context object for callback responses"""
+        """Create context object for callback responses.
+
+        V25 FIX: Always generate a fresh message_id for each callback response.
+        ONDC spec requires message_id to be unique per call — it must NOT echo
+        the request's message_id. transaction_id is still echoed (same transaction).
+        """
         context = {
             "domain": (
                 (request_context.get("domain") if request_context else None)
@@ -162,11 +167,9 @@ class ONDCClient:
                 if request_context
                 else frappe.generate_hash(length=16)
             ),
-            "message_id": (
-                request_context.get("message_id")
-                if request_context
-                else frappe.generate_hash(length=16)
-            ),
+            # V25 FIX: Always generate a fresh message_id — never echo the request's.
+            # Pramaan checks that each on_* call has a unique message_id.
+            "message_id": frappe.generate_hash(length=16),
             # V18 FIX: Use strftime to avoid microseconds in timestamp
             "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "ttl": "PT30S",
