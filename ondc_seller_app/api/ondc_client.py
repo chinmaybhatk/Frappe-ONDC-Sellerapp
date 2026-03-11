@@ -367,11 +367,37 @@ class ONDCClient:
             if doc.category_code:
                 category_set.add(doc.category_code)
 
-        # Build categories from discovered items
-        categories = [
-            {"id": cat_code, "descriptor": {"code": cat_code}}
-            for cat_code in category_set
-        ]
+        # Build categories from discovered items with timing tags
+        categories = []
+        for cat_code in category_set:
+            categories.append({
+                "id": cat_code,
+                "descriptor": {"code": cat_code},
+                "tags": [
+                    {
+                        "code": "timing",
+                        "list": [
+                            {"code": "type", "value": "Order"},
+                            {"code": "location", "value": location_id},
+                            {"code": "day_from", "value": "1"},
+                            {"code": "day_to", "value": "7"},
+                            {"code": "time_from", "value": operating_start.replace(":", "")},
+                            {"code": "time_to", "value": operating_end.replace(":", "")},
+                        ],
+                    },
+                    {
+                        "code": "timing",
+                        "list": [
+                            {"code": "type", "value": "Delivery"},
+                            {"code": "location", "value": location_id},
+                            {"code": "day_from", "value": "1"},
+                            {"code": "day_to", "value": "7"},
+                            {"code": "time_from", "value": operating_start.replace(":", "")},
+                            {"code": "time_to", "value": operating_end.replace(":", "")},
+                        ],
+                    },
+                ],
+            })
 
         # Store location from settings (no more hardcoded GPS)
         store_gps = self.settings.get("store_gps") or "0.0,0.0"
@@ -429,6 +455,28 @@ class ONDCClient:
             {
                 "code": "timing",
                 "list": [
+                    {"code": "type", "value": "Order"},
+                    {"code": "location", "value": location_id},
+                    {"code": "day_from", "value": "1"},
+                    {"code": "day_to", "value": "7"},
+                    {"code": "time_from", "value": operating_start.replace(":", "")},
+                    {"code": "time_to", "value": operating_end.replace(":", "")},
+                ],
+            },
+            {
+                "code": "timing",
+                "list": [
+                    {"code": "type", "value": "Delivery"},
+                    {"code": "location", "value": location_id},
+                    {"code": "day_from", "value": "1"},
+                    {"code": "day_to", "value": "7"},
+                    {"code": "time_from", "value": operating_start.replace(":", "")},
+                    {"code": "time_to", "value": operating_end.replace(":", "")},
+                ],
+            },
+            {
+                "code": "timing",
+                "list": [
                     {"code": "type", "value": "All"},
                     {"code": "location", "value": location_id},
                     {"code": "day_from", "value": "1"},
@@ -456,6 +504,26 @@ class ONDCClient:
                 "long_desc": store_long_desc,
                 "symbol": store_logo,
                 "images": store_images,
+                "tags": [
+                    {
+                        "code": "bpp_terms",
+                        "list": [
+                            {"code": "np_type", "value": "MSN"},
+                            {"code": "accept_bap_terms", "value": "Y"},
+                            {"code": "collect_payment", "value": "Y"},
+                        ],
+                    },
+                    {
+                        "code": "bpp_terms",
+                        "list": [
+                            {"code": "max_liability", "value": "2"},
+                            {"code": "max_liability_cap", "value": "10000"},
+                            {"code": "mandatory_arbitration", "value": "false"},
+                            {"code": "court_jurisdiction", "value": "Bengaluru"},
+                            {"code": "delay_interest", "value": "1000"},
+                        ],
+                    },
+                ],
             },
             "bpp/fulfillments": fulfillment_types,
             "bpp/providers": [
@@ -468,10 +536,21 @@ class ONDCClient:
                         "symbol": store_logo,
                         "images": store_images,
                     },
+                    "time": {
+                        "label": "enable",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    },
                     "locations": [
                         {
                             "id": location_id,
                             "gps": store_gps,
+                            "circle": {
+                                "gps": store_gps,
+                                "radius": {
+                                    "unit": "km",
+                                    "value": self.settings.get("serviceable_radius") or "10",
+                                },
+                            },
                             "address": {
                                 "locality": store_locality,
                                 "city": store_city,
@@ -501,7 +580,7 @@ class ONDCClient:
                     # NOTE: "payments" is NOT allowed in on_search response per ONDC schema.
                     # It belongs only in on_select / on_init / on_confirm.
                     "tags": provider_tags,
-                    "ttl": "PT24H",
+                    "ttl": "P1D",
                 }
             ],
         }
@@ -552,7 +631,6 @@ class ONDCClient:
                 "id": item_id,
                 "fulfillment_id": "F1",
                 "quantity": {"count": actual_qty},
-                "price": {"currency": "INR", "value": str(price)},
             })
 
             quote_breakup.append({
@@ -561,6 +639,7 @@ class ONDCClient:
                 "@ondc/org/item_quantity": {"count": actual_qty},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {"price": {"currency": "INR", "value": str(price)}},
             })
 
         # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
@@ -572,34 +651,70 @@ class ONDCClient:
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
-        # Packing charges
+        # Packing charges (always included, even if ₹0)
         packing_charge = float(self.settings.get("default_packing_charge") or 0)
-        if packing_charge > 0:
-            quote_breakup.append({
-                "title": "Packing charges",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "packing",
-                "price": {"currency": "INR", "value": str(packing_charge)},
-            })
+        quote_breakup.append({
+            "title": "Packing charges",
+            "@ondc/org/item_id": "F1",
+            "@ondc/org/title_type": "packing",
+            "price": {"currency": "INR", "value": str(packing_charge)},
+        })
 
-        # Tax (configurable)
+        # Per-item tax breakup
         tax_rate = float(self.settings.get("default_tax_rate") or 0)
-        tax_amount = round(item_total * tax_rate / 100, 2) if tax_rate > 0 else 0
-        if tax_amount > 0:
+        total_tax = 0.0
+        for item in items:
+            item_id = item.get("id")
+            quantity = int(item.get("quantity", {}).get("count", 1))
+
+            # Find the resolved item to get line_total
+            product = None
+            try:
+                product = frappe.get_doc("ONDC Product", {"ondc_product_id": item_id})
+            except frappe.DoesNotExistError:
+                continue
+
+            if not product:
+                continue
+
+            # Cap quantity to available
+            available = int(product.available_quantity or 0)
+            actual_qty = min(quantity, available)
+            price = float(product.price or 0)
+            line_total = price * actual_qty
+
+            item_tax = round(line_total * tax_rate / 100, 2)
+            total_tax += item_tax
             quote_breakup.append({
                 "title": "Tax",
-                "@ondc/org/item_id": "F1",
+                "@ondc/org/item_id": item_id,
                 "@ondc/org/title_type": "tax",
-                "price": {"currency": "INR", "value": str(tax_amount)},
+                "price": {"currency": "INR", "value": str(item_tax)},
             })
 
-        grand_total = item_total + delivery_charge + packing_charge + tax_amount
+        # Convenience fee
+        convenience_fee = float(self.settings.get("convenience_fee") or 0)
+        quote_breakup.append({
+            "title": "Convenience Fee",
+            "@ondc/org/item_id": "F1",
+            "@ondc/org/title_type": "misc",
+            "price": {"currency": "INR", "value": str(convenience_fee)},
+        })
+
+        grand_total = item_total + delivery_charge + packing_charge + total_tax + convenience_fee
 
         order["items"] = resolved_items
         order["quote"] = {
             "price": {"currency": "INR", "value": str(round(grand_total, 2))},
             "breakup": quote_breakup,
-            "ttl": "PT15M",
+            "ttl": "P1D",
+        }
+
+        # Add provider with locations
+        provider_id = order.get("provider", {}).get("id")
+        order["provider"] = {
+            "id": provider_id or self.settings.subscriber_id,
+            "locations": [{"id": f"LOC-{self.settings.city}"}],
         }
 
         # Add fulfillment with TAT
@@ -659,7 +774,6 @@ class ONDCClient:
                 "id": item_id,
                 "fulfillment_id": "F1",
                 "quantity": {"count": quantity},
-                "price": {"currency": "INR", "value": str(price)},
             })
             quote_breakup.append({
                 "title": product.product_name or item_id,
@@ -667,6 +781,7 @@ class ONDCClient:
                 "@ondc/org/item_quantity": {"count": quantity},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
+                "item": {"price": {"currency": "INR", "value": str(price)}},
             })
             item_total += line_total
 
@@ -679,25 +794,48 @@ class ONDCClient:
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
 
-        # Tax
+        # Packing charges (always included, even if ₹0)
+        packing_charge = float(self.settings.get("default_packing_charge") or 0)
+        quote_breakup.append({
+            "title": "Packing charges",
+            "@ondc/org/item_id": "F1",
+            "@ondc/org/title_type": "packing",
+            "price": {"currency": "INR", "value": str(packing_charge)},
+        })
+
+        # Per-item tax breakup
         tax_rate = float(self.settings.get("default_tax_rate") or 0)
-        tax_amount = round(item_total * tax_rate / 100, 2) if tax_rate > 0 else 0
-        if tax_amount > 0:
+        total_tax = 0.0
+        for item in items_in:
+            item_id = item.get("id")
+            quantity = int(item.get("quantity", {}).get("count", 1))
+            product = None
+            try:
+                product = frappe.get_doc("ONDC Product", {"ondc_product_id": item_id})
+            except frappe.DoesNotExistError:
+                continue
+            if not product:
+                continue
+
+            price = float(product.price or 0)
+            line_total = price * quantity
+            item_tax = round(line_total * tax_rate / 100, 2)
+            total_tax += item_tax
             quote_breakup.append({
                 "title": "Tax",
-                "@ondc/org/item_id": "F1",
+                "@ondc/org/item_id": item_id,
                 "@ondc/org/title_type": "tax",
-                "price": {"currency": "INR", "value": str(tax_amount)},
+                "price": {"currency": "INR", "value": str(item_tax)},
             })
 
-        grand_total = item_total + delivery_charge + tax_amount
+        grand_total = item_total + delivery_charge + packing_charge + total_tax
 
         if resolved_items:
             order["items"] = resolved_items
         order["quote"] = {
             "price": {"currency": "INR", "value": str(round(grand_total, 2))},
             "breakup": quote_breakup,
-            "ttl": "PT15M",
+            "ttl": "P1D",
         }
 
         # ----- 3. Fulfillments -----
@@ -707,6 +845,7 @@ class ONDCClient:
         if fulfillments_in:
             end_block = fulfillments_in[0].get("end", {})
 
+        store_gps = self.settings.get("store_gps") or "0.0,0.0"
         default_tat = self.settings.get("default_time_to_ship") or "PT60M"
         order["fulfillments"] = [
             {
@@ -717,6 +856,24 @@ class ONDCClient:
                 "@ondc/org/category": "Immediate Delivery",
                 "@ondc/org/TAT": default_tat,
                 "state": {"descriptor": {"code": "Serviceable"}},
+                "start": {
+                    "location": {
+                        "id": f"LOC-{self.settings.city}",
+                        "descriptor": {"name": self.settings.get("store_name") or self.settings.legal_entity_name},
+                        "gps": store_gps,
+                        "address": {
+                            "locality": self.settings.get("store_locality") or "",
+                            "city": self.settings.get("store_city_name") or self.settings.city,
+                            "state": self.settings.get("store_state") or "",
+                            "country": "IND",
+                            "area_code": self.settings.get("store_area_code") or self.settings.city,
+                        },
+                    },
+                    "contact": {
+                        "phone": self.settings.get("consumer_care_phone") or "",
+                        "email": self.settings.get("consumer_care_email") or "",
+                    },
+                },
                 **({"end": end_block} if end_block else {}),
             }
         ]
@@ -747,16 +904,64 @@ class ONDCClient:
                     "settlement_phase": "sale-amount",
                     "settlement_type": "neft",
                     "beneficiary_name": self.settings.legal_entity_name or "",
-                    "settlement_bank_account_no": "",
-                    "settlement_ifsc_code": "",
-                    "bank_name": "",
-                    "branch_name": "",
+                    "settlement_bank_account_no": self.settings.get("settlement_bank_account") or "",
+                    "settlement_ifsc_code": self.settings.get("settlement_ifsc_code") or "",
+                    "bank_name": self.settings.get("settlement_bank_name") or "",
+                    "branch_name": self.settings.get("settlement_branch_name") or "",
                 }
             ],
         }
         order["payment"] = payment
 
-        # ----- 5. Billing (keep from request) -----
+        # ----- 5. Cancellation terms -----
+        order["cancellation_terms"] = [
+            {
+                "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": False,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+        ]
+
+        # ----- 6. BPP/BAP terms tags -----
+        order["tags"] = [
+            {
+                "code": "bpp_terms",
+                "list": [
+                    {"code": "np_type", "value": "MSN"},
+                    {"code": "accept_bap_terms", "value": "Y"},
+                    {"code": "collect_payment", "value": "Y"},
+                    {"code": "max_liability", "value": "2"},
+                    {"code": "max_liability_cap", "value": "10000"},
+                    {"code": "mandatory_arbitration", "value": "false"},
+                    {"code": "court_jurisdiction", "value": "Bengaluru"},
+                    {"code": "delay_interest", "value": "1000"},
+                ],
+            },
+            {
+                "code": "bap_terms",
+                "list": [
+                    {"code": "accept_bpp_terms", "value": "Y"},
+                    {"code": "delay_interest", "value": "1000"},
+                ],
+            },
+        ]
+
+        # ----- 7. Billing (keep from request) -----
         if "billing" not in order:
             order["billing"] = {}
 
@@ -772,30 +977,127 @@ class ONDCClient:
         """
         order_id = order_data.get("id") or frappe.generate_hash(length=16)
 
+        store_gps = self.settings.get("store_gps") or "0.0,0.0"
+
+        # Build fulfillments with full start location and time ranges
+        fulfillments_in = order_data.get("fulfillments", [])
+        ful = fulfillments_in[0] if fulfillments_in else {"id": "F1", "type": "Delivery"}
+        ful["state"] = {"descriptor": {"code": "Pending"}}
+        ful["tracking"] = False
+        ful["@ondc/org/provider_name"] = self.settings.get("store_name") or self.settings.legal_entity_name
+        ful["@ondc/org/TAT"] = self.settings.get("default_time_to_ship") or "PT60M"
+        ful["start"] = {
+            "location": {
+                "id": f"LOC-{self.settings.city}",
+                "descriptor": {"name": self.settings.get("store_name") or self.settings.legal_entity_name},
+                "gps": store_gps,
+                "address": {
+                    "locality": self.settings.get("store_locality") or "",
+                    "city": self.settings.get("store_city_name") or self.settings.city,
+                    "state": self.settings.get("store_state") or "",
+                    "country": "IND",
+                    "area_code": self.settings.get("store_area_code") or self.settings.city,
+                },
+            },
+            "contact": {
+                "phone": self.settings.get("consumer_care_phone") or "",
+                "email": self.settings.get("consumer_care_email") or "",
+            },
+            "time": {
+                "range": {
+                    "start": datetime.utcnow().isoformat() + "Z",
+                    "end": (datetime.utcnow() + timedelta(hours=1)).isoformat() + "Z",
+                },
+            },
+        }
+
+        # Add routing tags
+        ful["tags"] = [
+            {
+                "code": "routing",
+                "list": [
+                    {"code": "type", "value": "P2P"},
+                ],
+            },
+        ]
+
         confirmed_order = {
             "id": order_id,
             "state": "Accepted",
             "provider": order_data.get("provider", {"id": self.settings.subscriber_id}),
             "items": order_data.get("items", []),
             "billing": order_data.get("billing", {}),
-            "fulfillments": order_data.get("fulfillments", [
-                {
-                    "id": "F1",
-                    "type": "Delivery",
-                    "state": {"descriptor": {"code": "Pending"}},
-                    "tracking": False,
-                }
-            ]),
+            "fulfillments": [ful],
             "quote": order_data.get("quote", {}),
             "payment": order_data.get("payment", {}),
             "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        # Set fulfillment state to Pending
-        for ful in confirmed_order.get("fulfillments", []):
-            if "state" not in ful:
-                ful["state"] = {"descriptor": {"code": "Pending"}}
+        # Add payment with settlement details
+        payment = order_data.get("payment", {})
+        if "@ondc/org/settlement_details" not in payment:
+            payment["@ondc/org/settlement_details"] = [
+                {
+                    "settlement_counterparty": "seller-app",
+                    "settlement_phase": "sale-amount",
+                    "settlement_type": "neft",
+                    "beneficiary_name": self.settings.legal_entity_name or "",
+                    "settlement_bank_account_no": self.settings.get("settlement_bank_account") or "",
+                    "settlement_ifsc_code": self.settings.get("settlement_ifsc_code") or "",
+                    "bank_name": self.settings.get("settlement_bank_name") or "",
+                    "branch_name": self.settings.get("settlement_branch_name") or "",
+                }
+            ]
+        confirmed_order["payment"] = payment
+
+        # Add cancellation terms
+        confirmed_order["cancellation_terms"] = [
+            {
+                "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": False,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+            {
+                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery"}},
+                "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
+                "reason_required": True,
+            },
+        ]
+
+        # Add BPP/BAP terms tags
+        confirmed_order["tags"] = [
+            {
+                "code": "bpp_terms",
+                "list": [
+                    {"code": "np_type", "value": "MSN"},
+                    {"code": "accept_bap_terms", "value": "Y"},
+                    {"code": "collect_payment", "value": "Y"},
+                    {"code": "max_liability", "value": "2"},
+                    {"code": "max_liability_cap", "value": "10000"},
+                    {"code": "mandatory_arbitration", "value": "false"},
+                    {"code": "court_jurisdiction", "value": "Bengaluru"},
+                    {"code": "delay_interest", "value": "1000"},
+                ],
+            },
+            {
+                "code": "bap_terms",
+                "list": [
+                    {"code": "accept_bpp_terms", "value": "Y"},
+                    {"code": "delay_interest", "value": "1000"},
+                ],
+            },
+        ]
 
         return confirmed_order
 
