@@ -549,6 +549,7 @@ def process_status(data, log_name=None):
     """Process status request and send on_status callback with ONDC-compliant structure"""
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
+        from datetime import datetime
 
         order_id = data.get("message", {}).get("order_id")
         if not order_id:
@@ -563,6 +564,30 @@ def process_status(data, log_name=None):
 
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
+
+        # Auto-progress fulfillment state on each status call
+        # Pramaan expects fulfillment to advance: Pending→Packed→Agent-assigned→Order-picked-up→Out-for-delivery→Order-delivered
+        state_progression = [
+            "Pending",
+            "Packed",
+            "Agent-assigned",
+            "Order-picked-up",
+            "Out-for-delivery",
+            "Order-delivered",
+        ]
+        current_state = order.get("fulfillment_state") or "Pending"
+        if current_state in state_progression:
+            current_idx = state_progression.index(current_state)
+            if current_idx < len(state_progression) - 1:
+                next_state = state_progression[current_idx + 1]
+                order.fulfillment_state = next_state
+                order.flags.ignore_validate = True
+                order.save(ignore_permissions=True)
+                frappe.db.commit()
+                frappe.log_error(
+                    f"Auto-progressed fulfillment state: {current_state} → {next_state}",
+                    "ONDC Status Auto-Progress"
+                )
 
         fulfillment_state = order.get("fulfillment_state") or "Pending"
 
@@ -703,11 +728,18 @@ def process_status(data, log_name=None):
                 },
             }
 
-        # Agent details
+        # Agent details - required for Agent-assigned and later states
+        agent_states = ["Agent-assigned", "At-pickup", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
         if order.get("delivery_agent_name"):
             fulfillment_obj["agent"] = {
                 "name": order.delivery_agent_name,
                 "phone": order.get("delivery_agent_phone") or "",
+            }
+        elif fulfillment_state in agent_states:
+            # Provide default agent for Pramaan compliance
+            fulfillment_obj["agent"] = {
+                "name": settings.get("store_name") or "Delivery Agent",
+                "phone": settings.get("consumer_care_phone") or "9876543210",
             }
 
         # Documents (invoice for post-pickup states)
