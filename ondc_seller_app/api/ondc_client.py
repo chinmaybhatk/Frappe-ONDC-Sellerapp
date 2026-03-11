@@ -591,8 +591,8 @@ class ONDCClient:
                                 "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                                 "days": "1,2,3,4,5,6,7",
                                 "schedule": {
-                                    "holidays": [{"date": ""}],
-                                    "frequency": "",
+                                    "holidays": [],
+                                    "frequency": "PT4H",
                                     "times": [f"{operating_start}", f"{operating_end}"],
                                 },
                                 "range": {
@@ -1145,8 +1145,8 @@ class ONDCClient:
             },
         ]
 
-        # Add BPP/BAP terms tags (only valid tag codes per ONDC spec)
-        confirmed_order["tags"] = [
+        # Add BPP terms tags only. Echo back BAP's bap_terms tag if present in order_data
+        tags_list = [
             {
                 "code": "bpp_terms",
                 "list": [
@@ -1159,14 +1159,16 @@ class ONDCClient:
                     {"code": "delay_interest", "value": "1000"},
                 ],
             },
-            {
-                "code": "bap_terms",
-                "list": [
-                    {"code": "accept_bpp_terms", "value": "Y"},
-                    {"code": "delay_interest", "value": "1000"},
-                ],
-            },
         ]
+
+        # Echo back BAP's bap_terms tag from the confirm request if present
+        bap_tags = order_data.get("tags", [])
+        for tag in bap_tags:
+            if tag.get("code") == "bap_terms":
+                tags_list.append(tag)
+                break
+
+        confirmed_order["tags"] = tags_list
 
         return confirmed_order
 

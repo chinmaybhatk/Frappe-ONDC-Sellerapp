@@ -250,7 +250,16 @@ def process_confirm(data, log_name=None):
         order.billing_city = address.get("city")
         order.billing_state = address.get("state")
         order.billing_area_code = address.get("area_code")
-        
+
+        # Store BAP's timestamps and billing info as JSON for echoing back in responses
+        order.custom_bap_data = json.dumps({
+            "bap_created_at": order_data.get("created_at"),
+            "bap_updated_at": order_data.get("updated_at"),
+            "billing_created_at": billing.get("created_at"),
+            "billing_updated_at": billing.get("updated_at"),
+            "billing_address_name": billing.get("address", {}).get("name"),
+        })
+
         # Fulfillment details
         fulfillment = order_data.get("fulfillments", [{}])[0]
         order.fulfillment_id = fulfillment.get("id")
@@ -428,6 +437,14 @@ def send_unsolicited_on_update(data, order_name):
 
         grand_total = item_total + total_tax + delivery_charge + packing_charge
 
+        # Extract BAP's stored timestamps and billing info
+        bap_data = {}
+        try:
+            if order.get("custom_bap_data"):
+                bap_data = json.loads(order.custom_bap_data) or {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         # Build fulfillments: active + cancellation
         fulfillment_obj = {
             "id": order.fulfillment_id or "F1",
@@ -453,11 +470,19 @@ def send_unsolicited_on_update(data, order_name):
                     "phone": settings.get("consumer_care_phone") or "",
                     "email": settings.get("consumer_care_email") or "",
                 },
+                "instructions": {
+                    "code": "PICKUP_INSTRUCTIONS",
+                    "name": "Pickup Instructions",
+                    "short_desc": "Please collect from store",
+                    "long_desc": "Pickup is available during store operating hours. Please bring a valid ID.",
+                    "images": [],
+                },
                 "time": {
                     "range": {
                         "start": datetime.utcnow().isoformat() + "Z",
                         "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=1)).isoformat() + "Z",
                     },
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
                 },
             },
             "tags": [
@@ -547,12 +572,13 @@ def send_unsolicited_on_update(data, order_name):
                     "state": order.billing_state or "",
                     "country": "IND",
                     "area_code": order.billing_area_code or "",
+                    "name": bap_data.get("billing_address_name") or order.billing_name or "",
                 },
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
                 "tax_number": order.get("billing_tax_number") or "",
-                "created_at": to_rfc3339(order.creation),
-                "updated_at": to_rfc3339(order.modified),
+                "created_at": bap_data.get("billing_created_at") or to_rfc3339(order.creation),
+                "updated_at": bap_data.get("billing_updated_at") or to_rfc3339(order.modified),
             },
             "fulfillments": fulfillments,
             "quote": {
@@ -588,7 +614,9 @@ def process_status(data, log_name=None):
         from ondc_seller_app.api.ondc_client import ONDCClient
         from datetime import datetime
 
-        order_id = data.get("message", {}).get("order_id")
+        # Try both possible paths for order_id: message.order.id (Pramaan format) or message.order_id (alternative)
+        message = data.get("message", {})
+        order_id = message.get("order", {}).get("id") or message.get("order_id")
         if not order_id:
             _update_webhook_log(log_name, status="Failed", error_message="Missing order_id")
             return
@@ -738,11 +766,19 @@ def process_status(data, log_name=None):
                     "phone": settings.get("consumer_care_phone") or "",
                     "email": settings.get("consumer_care_email") or "",
                 },
+                "instructions": {
+                    "code": "PICKUP_INSTRUCTIONS",
+                    "name": "Pickup Instructions",
+                    "short_desc": "Please collect from store",
+                    "long_desc": "Pickup is available during store operating hours. Please bring a valid ID.",
+                    "images": [],
+                },
                 "time": {
                     "range": {
                         "start": datetime.utcnow().isoformat() + "Z",
                         "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=1)).isoformat() + "Z",
                     },
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
                 },
             },
             "tags": [
@@ -839,6 +875,14 @@ def process_status(data, log_name=None):
             ],
         }
 
+        # Extract BAP's stored timestamps and billing info
+        bap_data = {}
+        try:
+            if order.get("custom_bap_data"):
+                bap_data = json.loads(order.custom_bap_data) or {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         order_payload = {
             "id": order.ondc_order_id,
             "state": order_state,
@@ -856,12 +900,13 @@ def process_status(data, log_name=None):
                     "state": order.billing_state or "",
                     "country": "IND",
                     "area_code": order.billing_area_code or "",
+                    "name": bap_data.get("billing_address_name") or order.billing_name or "",
                 },
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
                 "tax_number": order.get("billing_tax_number") or "",
-                "created_at": to_rfc3339(order.creation),
-                "updated_at": to_rfc3339(order.modified),
+                "created_at": bap_data.get("billing_created_at") or to_rfc3339(order.creation),
+                "updated_at": bap_data.get("billing_updated_at") or to_rfc3339(order.modified),
             },
             "fulfillments": [fulfillment_obj],
             "quote": {

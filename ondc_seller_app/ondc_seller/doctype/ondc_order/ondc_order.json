@@ -44,7 +44,8 @@
   "payment_status",
   "column_break_4",
   "total_amount",
-  "updated_at"
+  "updated_at",
+  "custom_bap_data"
  ],
  "fields": [
   {
@@ -251,6 +252,13 @@
    "fieldname": "updated_at",
    "fieldtype": "Datetime",
    "label": "Updated At"
+  },
+  {
+   "fieldname": "custom_bap_data",
+   "fieldtype": "Text",
+   "label": "BAP Data (JSON)",
+   "hidden": 1,
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
