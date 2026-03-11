@@ -358,6 +358,11 @@ class ONDCClient:
             "ONDC Product", filters={"is_active": 1}, fields=["*"]
         )
 
+        # Define location_id, operating hours FIRST (needed by categories loop below)
+        location_id = f"LOC-{self.settings.city}"
+        operating_start = self.settings.get("operating_hours_start") or "09:00"
+        operating_end = self.settings.get("operating_hours_end") or "21:00"
+
         items = []
         category_set = set()
         for product in products:
@@ -406,11 +411,7 @@ class ONDCClient:
         store_state = self.settings.get("store_state") or ""
         store_area_code = self.settings.get("store_area_code") or self.settings.city
 
-        location_id = f"LOC-{self.settings.city}"
-
-        # Operating hours from settings
-        operating_start = self.settings.get("operating_hours_start") or "09:00"
-        operating_end = self.settings.get("operating_hours_end") or "21:00"
+        # location_id, operating_start, operating_end already defined above (before categories loop)
 
         store_name = self.settings.get("store_name") or self.settings.legal_entity_name or "ONDC Seller"
         store_short_desc = self.settings.get("store_short_desc") or "Quality products at best prices"
