@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.document import Document
 import json
+from datetime import datetime
 
 
 class ONDCProduct(Document):
@@ -57,12 +58,15 @@ class ONDCProduct(Document):
         for img in self.images:
             images.append(img.image_url)
 
+        # Build descriptor with proper code format: type:code (5:others means type 5)
+        descriptor_code = self.get("descriptor_code") or f"5:{self.ondc_product_id.replace('-', '')}"
+
         # Build descriptor
         item = {
             "id": self.ondc_product_id,
             "descriptor": {
                 "name": self.product_name or "",
-                "code": self.ondc_product_id,
+                "code": descriptor_code,
                 "short_desc": self.short_desc or "",
                 "long_desc": self.long_desc or "",
                 "symbol": images[0] if images else "",
@@ -89,6 +93,10 @@ class ONDCProduct(Document):
                         "value": str(int(self.minimum_quantity or 1)),
                     }
                 },
+            },
+            "time": {
+                "label": "enable",
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             },
             # ONDC-specific fields (configurable per product, not hardcoded)
             "@ondc/org/returnable": bool(self.get("is_returnable")),

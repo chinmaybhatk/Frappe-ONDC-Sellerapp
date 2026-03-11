@@ -363,6 +363,11 @@ class ONDCClient:
         operating_start = self.settings.get("operating_hours_start") or "09:00"
         operating_end = self.settings.get("operating_hours_end") or "21:00"
 
+        # RFC3339 timestamps for operating hours
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        operating_start_rfc = f"{today}T{operating_start}:00.000Z"
+        operating_end_rfc = f"{today}T{operating_end}:00.000Z"
+
         items = []
         category_set = set()
         for product in products:
@@ -419,14 +424,35 @@ class ONDCClient:
         store_logo = self.settings.get("store_logo") or ""
         store_images = [store_logo] if store_logo else []
 
-        # Supported fulfillment types
+        # Supported fulfillment types with contact info
         fulfillment_types = []
         if self.settings.get("support_delivery"):
-            fulfillment_types.append({"id": "F1", "type": "Delivery"})
+            fulfillment_types.append({
+                "id": "F1",
+                "type": "Delivery",
+                "contact": {
+                    "phone": self.settings.get("consumer_care_phone") or "",
+                    "email": self.settings.get("consumer_care_email") or "",
+                }
+            })
         if self.settings.get("support_pickup"):
-            fulfillment_types.append({"id": "F2", "type": "Self-Pickup"})
+            fulfillment_types.append({
+                "id": "F2",
+                "type": "Self-Pickup",
+                "contact": {
+                    "phone": self.settings.get("consumer_care_phone") or "",
+                    "email": self.settings.get("consumer_care_email") or "",
+                }
+            })
         if not fulfillment_types:
-            fulfillment_types.append({"id": "F1", "type": "Delivery"})
+            fulfillment_types.append({
+                "id": "F1",
+                "type": "Delivery",
+                "contact": {
+                    "phone": self.settings.get("consumer_care_phone") or "",
+                    "email": self.settings.get("consumer_care_email") or "",
+                }
+            })
 
         # Supported payment types
         payment_types = []
@@ -553,6 +579,7 @@ class ONDCClient:
                                 },
                             },
                             "address": {
+                                "street": self.settings.get("store_street") or "Store Address",
                                 "locality": store_locality,
                                 "city": store_city,
                                 "state": store_state,
@@ -561,17 +588,21 @@ class ONDCClient:
                             },
                             "time": {
                                 "label": "enable",
-                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                                 "days": "1,2,3,4,5,6,7",
                                 "schedule": {
-                                    "holidays": [],
+                                    "holidays": [{"date": ""}],
                                     "frequency": "",
                                     "times": [f"{operating_start}", f"{operating_end}"],
                                 },
                                 "range": {
-                                    "start": operating_start,
-                                    "end": operating_end,
+                                    "start": operating_start_rfc,
+                                    "end": operating_end_rfc,
                                 },
+                            },
+                            "contact": {
+                                "phone": self.settings.get("consumer_care_phone") or "",
+                                "email": self.settings.get("consumer_care_email") or "",
                             },
                         }
                     ],
@@ -640,7 +671,13 @@ class ONDCClient:
                 "@ondc/org/item_quantity": {"count": actual_qty},
                 "@ondc/org/title_type": "item",
                 "price": {"currency": "INR", "value": str(line_total)},
-                "item": {"price": {"currency": "INR", "value": str(price)}},
+                "item": {
+                    "price": {"currency": "INR", "value": str(price)},
+                    "quantity": {
+                        "available": {"count": str(actual_qty)},
+                        "maximum": {"count": str(available)},
+                    }
+                },
             })
 
         # Delivery charges — ALWAYS included in breakup per ONDC RET10 spec (even if ₹0)
@@ -874,6 +911,12 @@ class ONDCClient:
                         "phone": self.settings.get("consumer_care_phone") or "",
                         "email": self.settings.get("consumer_care_email") or "",
                     },
+                    "time": {
+                        "range": {
+                            "start": datetime.utcnow().isoformat() + "Z",
+                            "end": (datetime.utcnow() + timedelta(hours=1)).isoformat() + "Z",
+                        },
+                    },
                 },
                 **({"end": end_block} if end_block else {}),
             }
@@ -938,14 +981,13 @@ class ONDCClient:
             },
         ]
 
-        # ----- 6. BPP/BAP terms tags -----
+        # ----- 6. BPP/BAP terms tags (only valid tag codes per ONDC spec) -----
         order["tags"] = [
             {
                 "code": "bpp_terms",
                 "list": [
                     {"code": "np_type", "value": "MSN"},
                     {"code": "accept_bap_terms", "value": "Y"},
-                    {"code": "collect_payment", "value": "Y"},
                     {"code": "max_liability", "value": "2"},
                     {"code": "max_liability_cap", "value": "10000"},
                     {"code": "mandatory_arbitration", "value": "false"},
@@ -1012,6 +1054,18 @@ class ONDCClient:
             },
         }
 
+        # Add end location from fulfillment if provided, with time range
+        if fulfillments_in and len(fulfillments_in) > 0 and fulfillments_in[0].get("end"):
+            ful["end"] = fulfillments_in[0].get("end")
+            # Ensure end has time range
+            if "time" not in ful["end"]:
+                ful["end"]["time"] = {
+                    "range": {
+                        "start": datetime.utcnow().isoformat() + "Z",
+                        "end": (datetime.utcnow() + timedelta(hours=2)).isoformat() + "Z",
+                    },
+                }
+
         # Add routing tags
         ful["tags"] = [
             {
@@ -1022,6 +1076,17 @@ class ONDCClient:
             },
         ]
 
+        # Echo the BAP's created_at from the confirm request if available
+        bap_created_at = order_data.get("created_at")
+        if bap_created_at and isinstance(bap_created_at, str):
+            # If it's already in RFC3339 format, use it; otherwise convert
+            if "T" in bap_created_at and ("Z" in bap_created_at or "+" in bap_created_at):
+                created_at_value = bap_created_at
+            else:
+                created_at_value = datetime.utcnow().isoformat() + "Z"
+        else:
+            created_at_value = datetime.utcnow().isoformat() + "Z"
+
         confirmed_order = {
             "id": order_id,
             "state": "Accepted",
@@ -1031,7 +1096,7 @@ class ONDCClient:
             "fulfillments": [ful],
             "quote": order_data.get("quote", {}),
             "payment": order_data.get("payment", {}),
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": created_at_value,
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -1052,38 +1117,41 @@ class ONDCClient:
             ]
         confirmed_order["payment"] = payment
 
-        # Add cancellation terms
+        # Add cancellation terms with refund_eligible flag
         confirmed_order["cancellation_terms"] = [
             {
                 "fulfillment_state": {"descriptor": {"code": "Pending"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": False,
+                "refund_eligible": True,
             },
             {
                 "fulfillment_state": {"descriptor": {"code": "Packed"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
+                "refund_eligible": True,
             },
             {
                 "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
+                "refund_eligible": False,
             },
             {
                 "fulfillment_state": {"descriptor": {"code": "Out-for-delivery"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
+                "refund_eligible": False,
             },
         ]
 
-        # Add BPP/BAP terms tags
+        # Add BPP/BAP terms tags (only valid tag codes per ONDC spec)
         confirmed_order["tags"] = [
             {
                 "code": "bpp_terms",
                 "list": [
                     {"code": "np_type", "value": "MSN"},
                     {"code": "accept_bap_terms", "value": "Y"},
-                    {"code": "collect_payment", "value": "Y"},
                     {"code": "max_liability", "value": "2"},
                     {"code": "max_liability_cap", "value": "10000"},
                     {"code": "mandatory_arbitration", "value": "false"},

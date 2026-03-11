@@ -3,6 +3,7 @@ import json
 from frappe import _
 from werkzeug.wrappers import Response
 import traceback
+from datetime import datetime
 
 from ondc_seller_app.api.auth import verify_request, validate_context
 from ondc_seller_app.api.ondc_errors import (
@@ -14,6 +15,27 @@ from ondc_seller_app.api.ondc_errors import (
     FULFILLMENT_STATES,
     is_valid_fulfillment_transition,
 )
+
+
+def to_rfc3339(frappe_dt):
+    """Convert Frappe datetime to RFC3339 format with Z suffix"""
+    if not frappe_dt:
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if isinstance(frappe_dt, str):
+        # Try to parse Frappe format and convert to RFC3339
+        try:
+            from frappe.utils import get_datetime
+            dt = get_datetime(frappe_dt)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        except:
+            # Fallback: if already has T and Z, use as-is
+            if "T" in frappe_dt and ("Z" in frappe_dt or "+" in frappe_dt):
+                return frappe_dt
+            # Otherwise convert space to T and add .000Z
+            return str(frappe_dt).replace(" ", "T") + ".000Z" if " " in str(frappe_dt) else str(frappe_dt)
+    else:
+        # datetime object
+        return frappe_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 @frappe.whitelist(allow_guest=True)
@@ -431,6 +453,12 @@ def send_unsolicited_on_update(data, order_name):
                     "phone": settings.get("consumer_care_phone") or "",
                     "email": settings.get("consumer_care_email") or "",
                 },
+                "time": {
+                    "range": {
+                        "start": datetime.utcnow().isoformat() + "Z",
+                        "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=1)).isoformat() + "Z",
+                    },
+                },
             },
             "tags": [
                 {"code": "routing", "list": [{"code": "type", "value": "P2P"}]},
@@ -450,7 +478,13 @@ def send_unsolicited_on_update(data, order_name):
                     "gps": order.get("shipping_gps") or "",
                     "address": end_address,
                 },
-                "contact": {"phone": order.customer_phone or ""},
+                "person": {
+                    "name": order.customer_name or "",
+                },
+                "contact": {
+                    "phone": order.customer_phone or "",
+                    "email": order.customer_email or "",
+                },
             }
 
         fulfillments = [fulfillment_obj]
@@ -516,6 +550,9 @@ def send_unsolicited_on_update(data, order_name):
                 },
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
+                "tax_number": order.get("billing_tax_number") or "",
+                "created_at": to_rfc3339(order.creation),
+                "updated_at": to_rfc3339(order.modified),
             },
             "fulfillments": fulfillments,
             "quote": {
@@ -524,8 +561,8 @@ def send_unsolicited_on_update(data, order_name):
                 "ttl": "P1D",
             },
             "payment": payment_obj,
-            "created_at": str(order.creation) if order.creation else "",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": to_rfc3339(order.creation),
+            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
 
         payload = {"context": context, "message": {"order": order_payload}}
@@ -701,6 +738,12 @@ def process_status(data, log_name=None):
                     "phone": settings.get("consumer_care_phone") or "",
                     "email": settings.get("consumer_care_email") or "",
                 },
+                "time": {
+                    "range": {
+                        "start": datetime.utcnow().isoformat() + "Z",
+                        "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=1)).isoformat() + "Z",
+                    },
+                },
             },
             "tags": [
                 {
@@ -723,8 +766,18 @@ def process_status(data, log_name=None):
                     "gps": order.get("shipping_gps") or "",
                     "address": end_address,
                 },
+                "person": {
+                    "name": order.customer_name or "",
+                },
                 "contact": {
                     "phone": order.customer_phone or "",
+                    "email": order.customer_email or "",
+                },
+                "time": {
+                    "range": {
+                        "start": datetime.utcnow().isoformat() + "Z",
+                        "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=2)).isoformat() + "Z",
+                    },
                 },
             }
 
@@ -757,11 +810,16 @@ def process_status(data, log_name=None):
             fulfillment_obj["tracking"] = True
             fulfillment_obj["@ondc/org/tracking_url"] = order.tracking_url
 
-        # Payment
+        # Payment with params and settlement details
         payment_obj = {
             "type": order.payment_type or "ON-ORDER",
             "collected_by": "BAP" if (order.payment_type or "ON-ORDER") != "ON-FULFILLMENT" else "BPP",
             "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
+            "params": {
+                "currency": "INR",
+                "amount": str(round(grand_total, 2)),
+                "transaction_id": order.get("payment_transaction_id") or order.ondc_order_id,
+            },
             "@ondc/org/buyer_app_finder_fee_type": "percent",
             "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
             "@ondc/org/settlement_basis": "delivery",
@@ -801,6 +859,9 @@ def process_status(data, log_name=None):
                 },
                 "email": order.customer_email or "",
                 "phone": order.customer_phone or "",
+                "tax_number": order.get("billing_tax_number") or "",
+                "created_at": to_rfc3339(order.creation),
+                "updated_at": to_rfc3339(order.modified),
             },
             "fulfillments": [fulfillment_obj],
             "quote": {
@@ -809,8 +870,8 @@ def process_status(data, log_name=None):
                 "ttl": "P1D",
             },
             "payment": payment_obj,
-            "created_at": str(order.creation) if order.creation else "",
-            "updated_at": str(order.modified) if order.modified else "",
+            "created_at": to_rfc3339(order.creation),
+            "updated_at": to_rfc3339(order.modified),
         }
 
         context = client.create_context("on_status", data.get("context"))
