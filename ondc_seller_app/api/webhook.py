@@ -330,26 +330,31 @@ def send_unsolicited_on_update(data, order_name):
     while remaining items stay. Fulfillment State = "Pending", Order State = "Accepted".
     """
     import time
-    time.sleep(2)  # Brief delay to ensure on_confirm is processed first
+    import datetime as dt_module
+
+    time.sleep(3)  # Brief delay to ensure on_confirm is processed first
 
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         order = frappe.get_doc("ONDC Order", order_name)
+        order.reload()  # ensure child tables are loaded
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
 
-        # Build context with NEW message_id (unsolicited = new message)
+        # Build context (create_context now auto-generates unique message_id)
         req_context = data.get("context", {})
         context = client.create_context("on_update", req_context)
-        # Override message_id for unsolicited call
-        context["message_id"] = frappe.generate_hash(length=32)
 
         store_gps = settings.get("store_gps") or "0.0,0.0"
         store_name = settings.get("store_name") or settings.legal_entity_name or "ONDC Seller"
         location_id = f"LOC-{settings.city}"
         tax_rate = float(settings.get("default_tax_rate") or 0)
+
+        now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        hour_later = (datetime.utcnow() + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        two_hours = (datetime.utcnow() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         # --- Partial cancellation logic ---
         # For Pramaan Flow 3A: reduce the first item's quantity by 1
@@ -359,8 +364,16 @@ def send_unsolicited_on_update(data, order_name):
         item_total = 0.0
         total_tax = 0.0
         cancelled_items = []
+        partial_cancel_info = []  # store for later use by process_status
 
         order_items = list(order.items)
+        if not order_items:
+            frappe.log_error(
+                title="on_update: no items",
+                message=f"Order {order_name} has no items, skipping unsolicited on_update"
+            )
+            return
+
         for idx, item in enumerate(order_items):
             price = float(item.price or 0)
             original_qty = int(item.quantity or 1)
@@ -377,7 +390,7 @@ def send_unsolicited_on_update(data, order_name):
                 new_qty = original_qty
                 cancelled_qty = 0
 
-            # Active items
+            # Active items (on forward fulfillment F1)
             if new_qty > 0:
                 line_total = price * new_qty
                 item_total += line_total
@@ -403,21 +416,20 @@ def send_unsolicited_on_update(data, order_name):
                     "price": {"currency": "INR", "value": str(item_tax)},
                 })
 
-            # Cancelled portion
+            # Cancelled portion (on cancel fulfillment C1)
             if cancelled_qty > 0:
+                cancelled_amount = price * cancelled_qty
                 cancelled_items.append({
                     "id": item.ondc_item_id,
-                    "fulfillment_id": "C1",  # Cancellation fulfillment
+                    "fulfillment_id": "C1",
                     "quantity": {"count": cancelled_qty},
-                    "tags": [
-                        {
-                            "code": "update_details",
-                            "list": [
-                                {"code": "update_type", "value": "cancel"},
-                                {"code": "reason_code", "value": "009"},
-                            ],
-                        },
-                    ],
+                })
+                partial_cancel_info.append({
+                    "item_id": item.ondc_item_id,
+                    "cancelled_qty": cancelled_qty,
+                    "active_qty": new_qty,
+                    "price": price,
+                    "cancelled_amount": cancelled_amount,
                 })
 
         # Add cancelled items to the items list
@@ -426,7 +438,7 @@ def send_unsolicited_on_update(data, order_name):
         delivery_charge = float(settings.get("default_delivery_charge") or 0)
         quote_breakup.append({
             "title": "Delivery charges",
-            "@ondc/org/item_id": "F1",
+            "@ondc/org/item_id": order.fulfillment_id or "F1",
             "@ondc/org/title_type": "delivery",
             "price": {"currency": "INR", "value": str(delivery_charge)},
         })
@@ -434,7 +446,7 @@ def send_unsolicited_on_update(data, order_name):
         packing_charge = float(settings.get("default_packing_charge") or 0)
         quote_breakup.append({
             "title": "Packing charges",
-            "@ondc/org/item_id": "F1",
+            "@ondc/org/item_id": order.fulfillment_id or "F1",
             "@ondc/org/title_type": "packing",
             "price": {"currency": "INR", "value": str(packing_charge)},
         })
@@ -449,7 +461,7 @@ def send_unsolicited_on_update(data, order_name):
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Build fulfillments: active + cancellation
+        # Build fulfillments: active (F1) + cancellation (C1)
         fulfillment_obj = {
             "id": order.fulfillment_id or "F1",
             "type": order.fulfillment_type or "Delivery",
@@ -474,19 +486,9 @@ def send_unsolicited_on_update(data, order_name):
                     "phone": settings.get("consumer_care_phone") or "",
                     "email": settings.get("consumer_care_email") or "",
                 },
-                "instructions": {
-                    "code": "PICKUP_INSTRUCTIONS",
-                    "name": "Pickup Instructions",
-                    "short_desc": "Please collect from store",
-                    "long_desc": "Pickup is available during store operating hours. Please bring a valid ID.",
-                    "images": [],
-                },
                 "time": {
-                    "range": {
-                        "start": datetime.utcnow().isoformat() + "Z",
-                        "end": (datetime.utcnow() + __import__('datetime').timedelta(hours=1)).isoformat() + "Z",
-                    },
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "range": {"start": now_str, "end": hour_later},
+                    "timestamp": now_str,
                 },
             },
             "tags": [
@@ -507,32 +509,44 @@ def send_unsolicited_on_update(data, order_name):
                     "gps": order.get("shipping_gps") or "",
                     "address": end_address,
                 },
-                "person": {
-                    "name": order.customer_name or "",
-                },
+                "person": {"name": order.customer_name or ""},
                 "contact": {
                     "phone": order.customer_phone or "",
                     "email": order.customer_email or "",
                 },
+                "time": {"range": {"start": now_str, "end": two_hours}},
             }
 
         fulfillments = [fulfillment_obj]
 
-        # Cancellation fulfillment for cancelled items
+        # Cancellation fulfillment (C1) with cancel_request + quote_trail tags
         if cancelled_items:
+            cancel_tags = [
+                {
+                    "code": "cancel_request",
+                    "list": [
+                        {"code": "reason_id", "value": "009"},
+                        {"code": "initiated_by", "value": settings.subscriber_id},
+                    ],
+                },
+            ]
+            # Add quote_trail for each cancelled item (per ONDC spec)
+            for ci in partial_cancel_info:
+                cancel_tags.append({
+                    "code": "quote_trail",
+                    "list": [
+                        {"code": "type", "value": "item"},
+                        {"code": "id", "value": ci["item_id"]},
+                        {"code": "currency", "value": "INR"},
+                        {"code": "value", "value": str(-ci["cancelled_amount"])},
+                    ],
+                })
+
             fulfillments.append({
                 "id": "C1",
                 "type": "Cancel",
                 "state": {"descriptor": {"code": "Cancelled"}},
-                "tags": [
-                    {
-                        "code": "cancel_request",
-                        "list": [
-                            {"code": "reason_id", "value": "009"},
-                            {"code": "initiated_by", "value": settings.subscriber_id},
-                        ],
-                    },
-                ],
+                "tags": cancel_tags,
             })
 
         # Payment
@@ -540,6 +554,11 @@ def send_unsolicited_on_update(data, order_name):
             "type": order.payment_type or "ON-ORDER",
             "collected_by": "BAP" if (order.payment_type or "ON-ORDER") != "ON-FULFILLMENT" else "BPP",
             "status": "PAID" if order.payment_status == "Paid" else "NOT-PAID",
+            "params": {
+                "currency": "INR",
+                "amount": str(round(grand_total, 2)),
+                "transaction_id": order.get("payment_transaction_id") or order.ondc_order_id,
+            },
             "@ondc/org/buyer_app_finder_fee_type": "percent",
             "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
             "@ondc/org/settlement_basis": "delivery",
@@ -592,10 +611,16 @@ def send_unsolicited_on_update(data, order_name):
             },
             "payment": payment_obj,
             "created_at": to_rfc3339(order.creation),
-            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "updated_at": now_str,
         }
 
         payload = {"context": context, "message": {"order": order_payload}}
+
+        # Log full payload for debugging
+        frappe.log_error(
+            title="on_update PAYLOAD (unsolicited)",
+            message=json.dumps(payload, indent=2, default=str)[:20000],
+        )
 
         result = client.send_callback(
             req_context.get("bap_uri"),
@@ -604,9 +629,26 @@ def send_unsolicited_on_update(data, order_name):
         )
 
         frappe.log_error(
-            title="ONDC unsolicited on_update sent",
+            title="ONDC unsolicited on_update result",
             message=f"Order: {order.ondc_order_id}, Result: {json.dumps(result, default=str)[:2000]}"
         )
+
+        # --- Store partial cancel data on the order for use by subsequent on_status calls ---
+        if cancelled_items and partial_cancel_info:
+            bap_data["partial_cancel"] = {
+                "items": partial_cancel_info,
+                "cancel_reason_id": "009",
+                "cancelled_by": settings.subscriber_id,
+                "grand_total": round(grand_total, 2),
+                "item_total": item_total,
+                "total_tax": total_tax,
+            }
+            frappe.db.set_value(
+                "ONDC Order", order.name,
+                "custom_bap_data", json.dumps(bap_data),
+                update_modified=False
+            )
+            frappe.db.commit()
 
     except Exception as e:
         frappe.log_error(traceback.format_exc(), "ONDC unsolicited on_update Error")
@@ -687,8 +729,28 @@ def process_status(data, log_name=None):
         order_state = state_map.get(fulfillment_state, order.order_status or "Accepted")
         _t(f"4.state_map fulfillment={fulfillment_state} order={order_state}")
 
-        # ── 4. Build items and quote breakup ──
+        # ── 4. Load BAP data early (needed for partial cancel awareness) ──
+        bap_data = {}
+        raw_bap = order.get("custom_bap_data")
+        if raw_bap:
+            try:
+                bap_data = json.loads(raw_bap) if isinstance(raw_bap, str) else {}
+            except Exception:
+                bap_data = {}
+
+        partial_cancel = bap_data.get("partial_cancel")
+        has_partial_cancel = bool(partial_cancel and partial_cancel.get("items"))
+        _t(f"4a.bap_keys={list(bap_data.keys())[:5]} partial_cancel={has_partial_cancel}")
+
+        # Build a lookup of cancelled items {item_id: {cancelled_qty, active_qty, price, cancelled_amount}}
+        cancel_lookup = {}
+        if has_partial_cancel:
+            for ci in partial_cancel["items"]:
+                cancel_lookup[ci["item_id"]] = ci
+
+        # ── 5. Build items and quote breakup (partial-cancel aware) ──
         items_list = []
+        cancelled_items_list = []
         quote_breakup = []
         item_total = 0.0
         total_tax = 0.0
@@ -696,34 +758,57 @@ def process_status(data, log_name=None):
 
         for row in (order.items or []):
             price_val = float(row.price or 0)
-            qty_val = int(row.quantity or 1)
-            line_total = price_val * qty_val
-            item_total += line_total
+            original_qty = int(row.quantity or 1)
             item_id = row.ondc_item_id or ""
 
-            items_list.append({
-                "id": item_id,
-                "fulfillment_id": order.fulfillment_id or "F1",
-                "quantity": {"count": qty_val},
-            })
+            if has_partial_cancel and item_id in cancel_lookup:
+                # This item was partially/fully cancelled
+                ci = cancel_lookup[item_id]
+                active_qty = int(ci.get("active_qty", 0))
+                cancelled_qty = int(ci.get("cancelled_qty", 0))
+            else:
+                active_qty = original_qty
+                cancelled_qty = 0
 
-            quote_breakup.append({
-                "title": item_id,
-                "@ondc/org/item_id": item_id,
-                "@ondc/org/item_quantity": {"count": qty_val},
-                "@ondc/org/title_type": "item",
-                "price": {"currency": "INR", "value": str(line_total)},
-                "item": {"price": {"currency": "INR", "value": str(price_val)}},
-            })
+            # Active portion → F1 fulfillment
+            if active_qty > 0:
+                line_total = price_val * active_qty
+                item_total += line_total
 
-            item_tax = round(line_total * tax_rate / 100, 2) if tax_rate > 0 else 0
-            total_tax += item_tax
-            quote_breakup.append({
-                "title": "Tax",
-                "@ondc/org/item_id": item_id,
-                "@ondc/org/title_type": "tax",
-                "price": {"currency": "INR", "value": str(item_tax)},
-            })
+                items_list.append({
+                    "id": item_id,
+                    "fulfillment_id": order.fulfillment_id or "F1",
+                    "quantity": {"count": active_qty},
+                })
+
+                quote_breakup.append({
+                    "title": item_id,
+                    "@ondc/org/item_id": item_id,
+                    "@ondc/org/item_quantity": {"count": active_qty},
+                    "@ondc/org/title_type": "item",
+                    "price": {"currency": "INR", "value": str(line_total)},
+                    "item": {"price": {"currency": "INR", "value": str(price_val)}},
+                })
+
+                item_tax = round(line_total * tax_rate / 100, 2) if tax_rate > 0 else 0
+                total_tax += item_tax
+                quote_breakup.append({
+                    "title": "Tax",
+                    "@ondc/org/item_id": item_id,
+                    "@ondc/org/title_type": "tax",
+                    "price": {"currency": "INR", "value": str(item_tax)},
+                })
+
+            # Cancelled portion → C1 fulfillment
+            if cancelled_qty > 0:
+                cancelled_items_list.append({
+                    "id": item_id,
+                    "fulfillment_id": "C1",
+                    "quantity": {"count": cancelled_qty},
+                })
+
+        # Add cancelled items to the main items list
+        items_list.extend(cancelled_items_list)
 
         delivery_charge = float(settings.get("default_delivery_charge") or 0)
         packing_charge = float(settings.get("default_packing_charge") or 0)
@@ -742,9 +827,9 @@ def process_status(data, log_name=None):
             })
 
         grand_total = item_total + total_tax + delivery_charge + packing_charge + convenience_fee
-        _t(f"5.items={len(items_list)} grand={grand_total}")
+        _t(f"5.items={len(items_list)} cancelled={len(cancelled_items_list)} grand={grand_total}")
 
-        # ── 5. Build fulfillment object ──
+        # ── 6. Build fulfillment object (F1 - active delivery) ──
         now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         hour_later = (datetime.utcnow() + dt_module.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         two_hours = (datetime.utcnow() + dt_module.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -842,9 +927,42 @@ def process_status(data, log_name=None):
             fulfillment_obj["tracking"] = True
             fulfillment_obj["@ondc/org/tracking_url"] = order.tracking_url
 
-        _t(f"6.fulfillment keys={sorted(fulfillment_obj.keys())}")
+        # Build fulfillments list: F1 + optional C1 for partial cancellation
+        fulfillments_list = [fulfillment_obj]
 
-        # ── 6. Payment ──
+        if has_partial_cancel and cancelled_items_list:
+            # C1 cancel fulfillment with cancel_request + quote_trail tags
+            cancel_tags = [
+                {
+                    "code": "cancel_request",
+                    "list": [
+                        {"code": "reason_id", "value": partial_cancel.get("cancel_reason_id", "009")},
+                        {"code": "initiated_by", "value": partial_cancel.get("cancelled_by", settings.subscriber_id)},
+                    ],
+                },
+            ]
+            # quote_trail for each cancelled item (per ONDC spec)
+            for ci in partial_cancel["items"]:
+                cancel_tags.append({
+                    "code": "quote_trail",
+                    "list": [
+                        {"code": "type", "value": "item"},
+                        {"code": "id", "value": ci["item_id"]},
+                        {"code": "currency", "value": "INR"},
+                        {"code": "value", "value": str(-ci["cancelled_amount"])},
+                    ],
+                })
+            fulfillments_list.append({
+                "id": "C1",
+                "type": "Cancel",
+                "state": {"descriptor": {"code": "Cancelled"}},
+                "tags": cancel_tags,
+            })
+            _t(f"6a.C1 fulfillment added, {len(cancelled_items_list)} cancelled items")
+
+        _t(f"6.fulfillments={len(fulfillments_list)} keys={sorted(fulfillment_obj.keys())}")
+
+        # ── 7. Payment ──
         payment_type = order.payment_type or "ON-ORDER"
         payment_obj = {
             "type": payment_type,
@@ -873,16 +991,6 @@ def process_status(data, log_name=None):
         }
         _t("7.payment_ok")
 
-        # ── 7. BAP stored data ──
-        bap_data = {}
-        raw_bap = order.get("custom_bap_data")
-        if raw_bap:
-            try:
-                bap_data = json.loads(raw_bap) if isinstance(raw_bap, str) else {}
-            except Exception:
-                bap_data = {}
-        _t(f"8.bap_keys={list(bap_data.keys())[:5]}")
-
         # ── 8. Billing ──
         billing_obj = {
             "name": order.billing_name or order.customer_name or "",
@@ -901,7 +1009,7 @@ def process_status(data, log_name=None):
             "created_at": bap_data.get("billing_created_at") or to_rfc3339(order.creation),
             "updated_at": bap_data.get("billing_updated_at") or to_rfc3339(order.modified),
         }
-        _t(f"9.billing name={billing_obj['name'][:30]}")
+        _t(f"8.billing name={billing_obj['name'][:30]}")
 
         # ── 9. Assemble order payload ──
         order_payload = {
@@ -913,7 +1021,7 @@ def process_status(data, log_name=None):
             },
             "items": items_list,
             "billing": billing_obj,
-            "fulfillments": [fulfillment_obj],
+            "fulfillments": fulfillments_list,
             "quote": {
                 "price": {"currency": "INR", "value": str(round(grand_total, 2))},
                 "breakup": quote_breakup,
@@ -921,9 +1029,30 @@ def process_status(data, log_name=None):
             },
             "payment": payment_obj,
             "created_at": to_rfc3339(order.creation),
-            "updated_at": to_rfc3339(order.modified),
+            "updated_at": now_str,
         }
-        _t(f"10.payload keys={sorted(order_payload.keys())}")
+
+        # Add cancellation_terms if partial cancel exists (Flow 3A requirement)
+        if has_partial_cancel:
+            order_payload["cancellation_terms"] = [
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Pending", "short_desc": "Pending"}},
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                    "reason_required": False,
+                },
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Packed", "short_desc": "Packed"}},
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                    "reason_required": True,
+                },
+                {
+                    "fulfillment_state": {"descriptor": {"code": "Order-picked-up", "short_desc": "Order-picked-up"}},
+                    "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0.00"}},
+                    "reason_required": True,
+                },
+            ]
+
+        _t(f"9.payload keys={sorted(order_payload.keys())}")
 
         # ── 10. Send callback ──
         context = client.create_context("on_status", data.get("context"))

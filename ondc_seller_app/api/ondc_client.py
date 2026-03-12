@@ -177,11 +177,9 @@ class ONDCClient:
                 if request_context
                 else frappe.generate_hash(length=16)
             ),
-            "message_id": (
-                request_context.get("message_id")
-                if request_context
-                else frappe.generate_hash(length=16)
-            ),
+            # CRITICAL: Each callback MUST have a unique message_id.
+            # Do NOT echo the request's message_id — ONDC gateway validates uniqueness.
+            "message_id": frappe.generate_hash(length=32),
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "ttl": "PT30S",
         }
@@ -871,8 +869,19 @@ class ONDCClient:
 
         grand_total = item_total + delivery_charge + packing_charge + total_tax
 
+        # Always set resolved items; fall back to echoing BAP's items if DB lookup failed
         if resolved_items:
             order["items"] = resolved_items
+        elif not order.get("items"):
+            # Ensure items is never empty — echo whatever BAP sent with fulfillment_id
+            order["items"] = [
+                {
+                    "id": item.get("id", ""),
+                    "fulfillment_id": item.get("fulfillment_id", "F1"),
+                    "quantity": item.get("quantity", {"count": 1}),
+                }
+                for item in items_in
+            ]
         order["quote"] = {
             "price": {"currency": "INR", "value": str(round(grand_total, 2))},
             "breakup": quote_breakup,
@@ -885,6 +894,31 @@ class ONDCClient:
         end_block = {}
         if fulfillments_in:
             end_block = fulfillments_in[0].get("end", {})
+
+        # CRITICAL: end block MUST always be present per Pramaan validation.
+        # If BAP didn't provide one, build from billing address.
+        if not end_block:
+            billing = order.get("billing", {})
+            billing_addr = billing.get("address", {})
+            end_block = {
+                "location": {
+                    "gps": order.get("fulfillments", [{}])[0].get("end", {}).get("location", {}).get("gps", "0.0,0.0") if fulfillments_in else "0.0,0.0",
+                    "address": {
+                        "name": billing_addr.get("name") or billing.get("name", ""),
+                        "building": billing_addr.get("building", ""),
+                        "locality": billing_addr.get("locality", ""),
+                        "city": billing_addr.get("city", ""),
+                        "state": billing_addr.get("state", ""),
+                        "country": billing_addr.get("country", "IND"),
+                        "area_code": billing_addr.get("area_code", ""),
+                    },
+                },
+                "contact": {
+                    "phone": billing.get("phone", ""),
+                    "email": billing.get("email", ""),
+                },
+                "person": {"name": billing.get("name", "")},
+            }
 
         store_gps = self.settings.get("store_gps") or "0.0,0.0"
         default_tat = self.settings.get("default_time_to_ship") or "PT60M"
@@ -921,7 +955,7 @@ class ONDCClient:
                         },
                     },
                 },
-                **({"end": end_block} if end_block else {}),
+                "end": end_block,
             }
         ]
 
@@ -960,31 +994,32 @@ class ONDCClient:
         }
         order["payment"] = payment
 
-        # ----- 5. Cancellation terms -----
+        # ----- 5. Cancellation terms (short_desc required by Pramaan) -----
         order["cancellation_terms"] = [
             {
-                "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                "fulfillment_state": {"descriptor": {"code": "Pending", "short_desc": "Pending"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": False,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                "fulfillment_state": {"descriptor": {"code": "Packed", "short_desc": "Packed"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                "fulfillment_state": {"descriptor": {"code": "Order-picked-up", "short_desc": "Order-picked-up"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery"}},
+                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery", "short_desc": "Out-for-delivery"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
             },
         ]
 
         # ----- 6. BPP/BAP terms tags (only valid tag codes per ONDC spec) -----
+        # Note: bap_terms must NOT contain "accept_bpp_terms" — it's not in the allowed enum
         order["tags"] = [
             {
                 "code": "bpp_terms",
@@ -1001,8 +1036,7 @@ class ONDCClient:
             {
                 "code": "bap_terms",
                 "list": [
-                    {"code": "accept_bpp_terms", "value": "Y"},
-                    {"code": "delay_interest", "value": "1000"},
+                    {"code": "tax_number", "value": order.get("billing", {}).get("tax_number", "")},
                 ],
             },
         ]
@@ -1057,17 +1091,47 @@ class ONDCClient:
             },
         }
 
-        # Add end location from fulfillment if provided, with time range
+        # CRITICAL: end block MUST always be present per Pramaan validation.
+        # Use BAP's fulfillment end if provided, otherwise build from billing.
+        end_block = {}
         if fulfillments_in and len(fulfillments_in) > 0 and fulfillments_in[0].get("end"):
-            ful["end"] = fulfillments_in[0].get("end")
-            # Ensure end has time range
-            if "time" not in ful["end"]:
-                ful["end"]["time"] = {
-                    "range": {
-                        "start": datetime.utcnow().isoformat() + "Z",
-                        "end": (datetime.utcnow() + timedelta(hours=2)).isoformat() + "Z",
+            end_block = fulfillments_in[0].get("end")
+        if not end_block:
+            # Fallback: build from billing address
+            billing = order_data.get("billing", {})
+            billing_addr = billing.get("address", {})
+            end_block = {
+                "location": {
+                    "gps": "0.0,0.0",
+                    "address": {
+                        "name": billing_addr.get("name") or billing.get("name", ""),
+                        "building": billing_addr.get("building", ""),
+                        "locality": billing_addr.get("locality", ""),
+                        "city": billing_addr.get("city", ""),
+                        "state": billing_addr.get("state", ""),
+                        "country": billing_addr.get("country", "IND"),
+                        "area_code": billing_addr.get("area_code", ""),
                     },
-                }
+                },
+                "contact": {
+                    "phone": billing.get("phone", ""),
+                    "email": billing.get("email", ""),
+                },
+                "person": {"name": billing.get("name", "")},
+            }
+        # Ensure end has time range
+        if "time" not in end_block:
+            end_block["time"] = {
+                "range": {
+                    "start": datetime.utcnow().isoformat() + "Z",
+                    "end": (datetime.utcnow() + timedelta(hours=2)).isoformat() + "Z",
+                },
+            }
+        # Ensure person is present (on_confirm requires it)
+        if "person" not in end_block:
+            billing = order_data.get("billing", {})
+            end_block["person"] = {"name": billing.get("name", "")}
+        ful["end"] = end_block
 
         # Add routing tags
         ful["tags"] = [
@@ -1090,17 +1154,30 @@ class ONDCClient:
         else:
             created_at_value = datetime.utcnow().isoformat() + "Z"
 
+        # Ensure items is never empty
+        items = order_data.get("items", [])
+        if not items:
+            # Fallback: try building from quote breakup
+            quote_breakup = order_data.get("quote", {}).get("breakup", [])
+            for bp in quote_breakup:
+                if bp.get("@ondc/org/title_type") == "item":
+                    items.append({
+                        "id": bp.get("@ondc/org/item_id", ""),
+                        "fulfillment_id": "F1",
+                        "quantity": bp.get("@ondc/org/item_quantity", {"count": 1}),
+                    })
+
         confirmed_order = {
             "id": order_id,
             "state": "Accepted",
             "provider": order_data.get("provider", {"id": self.settings.subscriber_id}),
-            "items": order_data.get("items", []),
+            "items": items,
             "billing": order_data.get("billing", {}),
             "fulfillments": [ful],
             "quote": order_data.get("quote", {}),
             "payment": order_data.get("payment", {}),
             "created_at": created_at_value,
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": created_at_value,  # Use same timestamp as created_at for consistency
         }
 
         # Add payment with settlement details
@@ -1120,35 +1197,44 @@ class ONDCClient:
             ]
         confirmed_order["payment"] = payment
 
-        # Add cancellation terms with refund_eligible flag
+        # Add cancellation terms with refund_eligible flag + short_desc (required by Pramaan)
         confirmed_order["cancellation_terms"] = [
             {
-                "fulfillment_state": {"descriptor": {"code": "Pending"}},
+                "fulfillment_state": {"descriptor": {"code": "Pending", "short_desc": "Pending"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": False,
                 "refund_eligible": True,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Packed"}},
+                "fulfillment_state": {"descriptor": {"code": "Packed", "short_desc": "Packed"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
                 "refund_eligible": True,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Order-picked-up"}},
+                "fulfillment_state": {"descriptor": {"code": "Order-picked-up", "short_desc": "Order-picked-up"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
                 "refund_eligible": False,
             },
             {
-                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery"}},
+                "fulfillment_state": {"descriptor": {"code": "Out-for-delivery", "short_desc": "Out-for-delivery"}},
                 "cancellation_fee": {"percentage": "0", "amount": {"currency": "INR", "value": "0"}},
                 "reason_required": True,
                 "refund_eligible": False,
             },
         ]
 
-        # Add BPP terms tags only. Echo back BAP's bap_terms tag if present in order_data
+        # BPP terms + BAP terms tags
+        # CRITICAL: bap_terms must NOT contain "accept_bpp_terms" (not in Pramaan's allowed enum).
+        # Only use valid codes: tax_number, provider_tax_number, np_type, accept_bap_terms,
+        # max_liability_cap, max_liability, mandatory_arbitration, court_jurisdiction, delay_interest
+        VALID_TAG_CODES = {
+            "tax_number", "provider_tax_number", "np_type", "accept_bap_terms",
+            "max_liability_cap", "max_liability", "mandatory_arbitration",
+            "court_jurisdiction", "delay_interest",
+        }
+
         tags_list = [
             {
                 "code": "bpp_terms",
@@ -1164,13 +1250,24 @@ class ONDCClient:
             },
         ]
 
-        # Echo back BAP's bap_terms tag from the confirm request if present
+        # Echo back BAP's bap_terms tag, but filter out any invalid codes
+        bap_terms_list = []
         bap_tags = order_data.get("tags", [])
         for tag in bap_tags:
             if tag.get("code") == "bap_terms":
-                tags_list.append(tag)
+                for entry in tag.get("list", []):
+                    if entry.get("code") in VALID_TAG_CODES:
+                        bap_terms_list.append(entry)
                 break
 
+        # Always include bap_terms (even if empty from BAP, add tax_number)
+        if not bap_terms_list:
+            billing = order_data.get("billing", {})
+            bap_terms_list = [
+                {"code": "tax_number", "value": billing.get("tax_number", "")},
+            ]
+
+        tags_list.append({"code": "bap_terms", "list": bap_terms_list})
         confirmed_order["tags"] = tags_list
 
         return confirmed_order
