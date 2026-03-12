@@ -132,26 +132,34 @@ def calculate_digest(request_body):
 def lookup_public_key(subscriber_id, unique_key_id):
     """
     Look up a network participant's public key from the ONDC registry.
-    
+
     Args:
         subscriber_id: The subscriber's FQDN
         unique_key_id: The unique key identifier
-    
+
     Returns:
         str: Base64-encoded public key, or None if not found
     """
+    # Try local cache first (avoids slow registry round-trip)
+    cache_key = f"ondc_pubkey:{subscriber_id}:{unique_key_id}"
+    cached_key = frappe.cache().get_value(cache_key)
+    if cached_key:
+        return cached_key
+
     try:
         settings = frappe.get_single("ONDC Settings")
-        
-        # Registry lookup URL based on environment
+
+        # Registry lookup URLs — use v2.0 endpoint for preprod/prod.
+        # The old /ondc/lookup now 301-redirects to /v2.0/lookup and
+        # Python requests changes POST→GET on 301, losing the body.
         registry_urls = {
             "staging": "https://staging.registry.ondc.org/lookup",
-            "preprod": "https://preprod.registry.ondc.org/ondc/lookup",
-            "prod": "https://prod.registry.ondc.org/ondc/lookup",
+            "preprod": "https://preprod.registry.ondc.org/v2.0/lookup",
+            "prod": "https://prod.registry.ondc.org/v2.0/lookup",
         }
-        
+
         registry_url = registry_urls.get(settings.environment, registry_urls["staging"])
-        
+
         # Make lookup request
         payload = {
             "subscriber_id": subscriber_id,
@@ -159,42 +167,55 @@ def lookup_public_key(subscriber_id, unique_key_id):
             "domain": settings.domain,
             "type": "BAP"  # We are BPP, looking up BAP keys
         }
-        
+
         response = requests.post(
             registry_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=10
+            timeout=10,
         )
-        
+
         if response.status_code == 200:
             data = response.json()
-            # Extract signing public key from response
-            if isinstance(data, list) and len(data) > 0:
-                for entry in data:
-                    if entry.get("ukId") == unique_key_id or entry.get("unique_key_id") == unique_key_id:
-                        return entry.get("signing_public_key")
-                # If no exact match, return first entry's key
-                return data[0].get("signing_public_key")
-            elif isinstance(data, dict):
-                return data.get("signing_public_key")
-        
-        # Cache miss - try local cache
-        cached_key = frappe.cache().get_value(f"ondc_pubkey:{subscriber_id}:{unique_key_id}")
-        if cached_key:
-            return cached_key
-        
+            public_key = _extract_public_key(data, subscriber_id, unique_key_id)
+            if public_key:
+                # Cache for 1 hour
+                cache_public_key(subscriber_id, unique_key_id, public_key, ttl=3600)
+                return public_key
+
+        # Log non-200 responses for debugging
+        frappe.log_error(
+            f"Registry lookup for {subscriber_id}|{unique_key_id}: "
+            f"HTTP {response.status_code} — {response.text[:300]}",
+            "ONDC Registry Lookup",
+        )
         return None
-    
+
     except Exception as e:
-        frappe.log_error(f"Registry lookup failed for {subscriber_id}: {str(e)}", "ONDC Registry")
-        
-        # Try local cache as fallback
-        cached_key = frappe.cache().get_value(f"ondc_pubkey:{subscriber_id}:{unique_key_id}")
-        if cached_key:
-            return cached_key
-        
+        frappe.log_error(
+            f"Registry lookup failed for {subscriber_id}|{unique_key_id}: {str(e)}",
+            "ONDC Registry",
+        )
         return None
+
+
+def _extract_public_key(data, subscriber_id, unique_key_id):
+    """Extract signing_public_key from registry lookup response."""
+    if isinstance(data, list) and len(data) > 0:
+        # Prefer exact match on both subscriber_id and unique_key_id
+        for entry in data:
+            ukid = entry.get("ukId") or entry.get("unique_key_id", "")
+            if entry.get("subscriber_id") == subscriber_id and ukid == unique_key_id:
+                return entry.get("signing_public_key")
+        # Fallback: match subscriber_id only
+        for entry in data:
+            if entry.get("subscriber_id") == subscriber_id:
+                return entry.get("signing_public_key")
+        # Last resort: first entry
+        return data[0].get("signing_public_key")
+    elif isinstance(data, dict):
+        return data.get("signing_public_key")
+    return None
 
 
 def cache_public_key(subscriber_id, unique_key_id, public_key, ttl=3600):

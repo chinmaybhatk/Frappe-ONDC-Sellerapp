@@ -119,10 +119,6 @@ class ONDCClient:
 
         # Ensure callback_url does not double-slash
         url = callback_url.rstrip("/") + endpoint
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self.get_auth_header(payload),
-        }
 
         # CRITICAL: Serialize body ONCE with compact separators so the bytes
         # sent over the wire are identical to those used for digest calculation
@@ -130,6 +126,24 @@ class ONDCClient:
         # would re-serialize with default separators (spaces), causing a digest
         # mismatch and "Invalid Signature" at the receiver.
         body_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+        auth_header = self.get_auth_header(payload)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": auth_header,
+        }
+
+        # Debug: log the exact digest and auth header for troubleshooting
+        body_digest = hashlib.blake2b(body_bytes, digest_size=64).digest()
+        body_digest_b64 = base64.b64encode(body_digest).decode()
+        frappe.log_error(
+            f"Callback to {url}\n"
+            f"Body length: {len(body_bytes)} bytes\n"
+            f"Body BLAKE-512 digest: {body_digest_b64}\n"
+            f"Auth header: {auth_header}\n"
+            f"Body (first 300 chars): {body_bytes[:300].decode('utf-8', errors='replace')}",
+            "ONDC Callback Debug",
+        )
 
         try:
             response = requests.post(url=url, headers=headers, data=body_bytes, timeout=30)
@@ -146,7 +160,9 @@ class ONDCClient:
                 except Exception:
                     pass
             frappe.log_error(
-                f"ONDC Callback Error to {url}:\n{error_detail}\n\nPayload context: {json.dumps(payload.get('context', {}), indent=2)}",
+                f"ONDC Callback Error to {url}:\n{error_detail}\n\n"
+                f"Auth header sent: {auth_header}\n\n"
+                f"Payload context: {json.dumps(payload.get('context', {}), indent=2)}",
                 "ONDC Callback"
             )
             return {"success": False, "error": str(e), "response_body": response_body}
