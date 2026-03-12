@@ -91,12 +91,20 @@ class ONDCClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+        # CRITICAL: Serialize body ONCE with compact separators so the bytes
+        # sent over the wire are identical to those used for digest calculation
+        # in get_auth_header / _calculate_digest.  Using requests.post(json=)
+        # would re-serialize with default separators (spaces), causing a digest
+        # mismatch and "Invalid Signature" at the receiver.
+        body_bytes = None
         if data:
             headers["Authorization"] = self.get_auth_header(data)
+            body_bytes = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
         try:
             response = requests.request(
-                method=method, url=url, headers=headers, json=data, timeout=30
+                method=method, url=url, headers=headers, data=body_bytes, timeout=30
             )
             response.raise_for_status()
             return {"success": True, "data": response.json()}
@@ -116,8 +124,15 @@ class ONDCClient:
             "Authorization": self.get_auth_header(payload),
         }
 
+        # CRITICAL: Serialize body ONCE with compact separators so the bytes
+        # sent over the wire are identical to those used for digest calculation
+        # in get_auth_header / _calculate_digest.  Using requests.post(json=)
+        # would re-serialize with default separators (spaces), causing a digest
+        # mismatch and "Invalid Signature" at the receiver.
+        body_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
         try:
-            response = requests.post(url=url, headers=headers, json=payload, timeout=30)
+            response = requests.post(url=url, headers=headers, data=body_bytes, timeout=30)
             response.raise_for_status()
             return {"success": True, "data": response.json()}
         except requests.exceptions.RequestException as e:
