@@ -2202,3 +2202,77 @@ def get_recent_webhooks(limit=10):
         limit=int(limit)
     )
     return logs
+
+
+@frappe.whitelist(allow_guest=True)
+def debug_catalog():
+    """Diagnostic: build catalog and return it (or the error) synchronously"""
+    try:
+        from ondc_seller_app.api.ondc_client import ONDCClient
+        settings = frappe.get_single("ONDC Settings")
+        client = ONDCClient(settings)
+        catalog = client.build_catalog()
+        return {"success": True, "catalog": catalog}
+    except Exception as e:
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
+@frappe.whitelist(allow_guest=True)
+def get_error_logs_exact(method_name, limit=10):
+    """Diagnostic: fetch Error Log entries with exact method match via SQL"""
+    try:
+        rows = frappe.db.sql(
+            """SELECT name, method, LEFT(error, 2000) as error, creation
+               FROM `tabError Log`
+               WHERE method = %s
+               ORDER BY creation DESC
+               LIMIT %s""",
+            (method_name, int(limit)),
+            as_dict=True,
+        )
+        return {"success": True, "count": len(rows), "rows": rows}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@frappe.whitelist(allow_guest=True)
+def send_test_on_search():
+    """Diagnostic: fire a synchronous on_search to pramaan BAP URI and return result"""
+    try:
+        from ondc_seller_app.api.ondc_client import ONDCClient
+        settings = frappe.get_single("ONDC Settings")
+        client = ONDCClient(settings)
+
+        # Minimal fake search request mimicking a Pramaan Flow 3A search
+        fake_search = {
+            "context": {
+                "domain": "ONDC:RET11",
+                "country": "IND",
+                "city": "std:080",
+                "action": "search",
+                "core_version": "1.2.0",
+                "bap_id": "pramaan.ondc.org",
+                "bap_uri": "https://pramaan.ondc.org/beta/preprod/mock/buyer",
+                "bpp_id": settings.subscriber_id,
+                "bpp_uri": settings.subscriber_url,
+                "transaction_id": "test-diag-" + frappe.generate_hash(length=8),
+                "message_id": "test-diag-" + frappe.generate_hash(length=8),
+                "timestamp": "2026-03-12T00:00:00.000Z",
+                "ttl": "PT30S",
+            },
+            "message": {
+                "intent": {
+                    "fulfillment": {"type": "Delivery"},
+                    "payment": {"@ondc/org/buyer_app_finder_fee_type": "percent",
+                                "@ondc/org/buyer_app_finder_fee_amount": "3"},
+                    "tags": [{"code": "bap_terms",
+                              "list": [{"code": "finder_fee_type", "value": "percent"},
+                                       {"code": "finder_fee_amount", "value": "3"}]}]
+                }
+            }
+        }
+
+        result = client.on_search(fake_search)
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
