@@ -119,9 +119,15 @@ def registry_lookup_diagnostic():
     The ONDC gateway verifies our signatures by looking up our public key
     from the registry.  If the registry has a different key than what we
     use for signing, every callback will get 401 Invalid Signature.
+
+    The v2.0 registry endpoint requires a signed Authorization header,
+    so we sign the lookup request with our own key.
     """
     import base64
+    import hashlib
+    import nacl.signing
     import requests as http_requests
+    from datetime import datetime as _dt, timedelta as _td
 
     settings = frappe.get_single("ONDC Settings")
     results = {
@@ -137,94 +143,121 @@ def registry_lookup_diagnostic():
         "prod": "https://prod.registry.ondc.org",
     }.get(settings.environment, "https://preprod.registry.ondc.org")
 
+    # ── Build the signed lookup request ──────────────────────────────
     lookup_payload = {
         "subscriber_id": settings.subscriber_id,
         "type": "BPP",
         "domain": settings.domain,
     }
+    body_str = json.dumps(lookup_payload, separators=(",", ":"), ensure_ascii=False)
+    body_bytes = body_str.encode("utf-8")
 
-    # Try several known registry endpoints
-    endpoints = [
-        "/v2.0/lookup",
-        "/ondc/lookup",
-        "/vlookup",
-        "/subscriber/lkp",
-        "/lookup",
-    ]
+    # Digest
+    digest = hashlib.blake2b(body_bytes, digest_size=64).digest()
+    digest_b64 = base64.b64encode(digest).decode()
 
-    for ep in endpoints:
-        url = f"{registry_base}{ep}"
-        try:
-            # First try without following redirects to detect 301
-            resp = http_requests.post(
-                url,
-                json=lookup_payload,
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-                allow_redirects=False,
-            )
-            entry = {"status_code": resp.status_code}
+    # Timestamps
+    created = int(_dt.utcnow().timestamp())
+    expires = int((_dt.utcnow() + _td(minutes=5)).timestamp())
 
-            if resp.status_code in (301, 302, 307, 308):
-                redirect_url = resp.headers.get("Location", "")
-                entry["redirect_to"] = redirect_url
-                # Follow the redirect manually with POST preserved
-                if redirect_url:
-                    if not redirect_url.startswith("http"):
-                        redirect_url = f"{registry_base}{redirect_url}"
-                    resp2 = http_requests.post(
-                        redirect_url,
-                        json=lookup_payload,
-                        headers={"Content-Type": "application/json"},
-                        timeout=10,
-                        allow_redirects=False,
-                    )
-                    entry["redirect_status"] = resp2.status_code
-                    try:
-                        entry["redirect_response"] = resp2.json()
-                    except Exception:
-                        entry["redirect_response_text"] = resp2.text[:500]
-            elif resp.status_code == 200:
-                try:
-                    entry["response"] = resp.json()
-                except Exception:
-                    entry["response_text"] = resp.text[:500]
-            else:
-                entry["response_text"] = resp.text[:500]
+    # Signing string
+    signing_string = (
+        f"(created): {created}\n"
+        f"(expires): {expires}\n"
+        f"digest: BLAKE-512={digest_b64}"
+    )
 
-            results[ep] = entry
+    # Sign with our key
+    try:
+        priv_key_b64 = settings.get_password("signing_private_key")
+        raw_key = base64.b64decode(priv_key_b64)
+        if len(raw_key) == 64:
+            seed = raw_key[:32]
+        elif len(raw_key) == 48:
+            seed = raw_key[-32:]
+        elif len(raw_key) == 32:
+            seed = raw_key
+        else:
+            results["error"] = f"Bad private key length: {len(raw_key)}"
+            return results
+        sk = nacl.signing.SigningKey(seed)
+        signature = sk.sign(signing_string.encode()).signature
+        sig_b64 = base64.b64encode(signature).decode()
+    except Exception as e:
+        results["signing_error"] = str(e)
+        return results
 
-            # Extract registry key from successful response
-            resp_data = entry.get("response") or entry.get("redirect_response")
-            if resp_data:
-                registry_key = _extract_registry_key(resp_data, settings.subscriber_id, settings.unique_key_id)
-                if registry_key:
-                    results["registry_public_key"] = registry_key
-                    results["keys_match"] = registry_key == settings.signing_public_key
-                    if not results["keys_match"]:
-                        results["DIAGNOSIS"] = (
-                            "KEY MISMATCH! The public key in the ONDC registry is DIFFERENT "
-                            "from the key we use for signing.  Re-register the correct key "
-                            "via the ONDC preprod portal, or update the local private/public "
-                            "key pair to match what is registered."
-                        )
-                    else:
-                        results["DIAGNOSIS"] = (
-                            "Keys match.  The signing key is registered correctly.  "
-                            "The Invalid Signature error may be caused by something else "
-                            "(body encoding, digest format, etc.)."
-                        )
-                    break  # We got what we needed
-        except Exception as e:
-            results[ep] = {"error": str(e)}
+    auth_header = (
+        f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
+        f'algorithm="ed25519",created="{created}",expires="{expires}",'
+        f'headers="(created) (expires) digest",signature="{sig_b64}"'
+    )
 
-    # If no registry key was found at all, note that
-    if "registry_public_key" not in results:
-        results["DIAGNOSIS"] = (
-            "Could not retrieve our public key from ANY registry endpoint.  "
-            "This likely means our subscriber is not registered or the registry "
-            "endpoints have changed.  Check the ONDC preprod portal."
+    results["auth_header_sent"] = auth_header[:120] + "..."
+
+    # ── Hit the v2.0 lookup endpoint with the signed request ─────────
+    url = f"{registry_base}/v2.0/lookup"
+    try:
+        resp = http_requests.post(
+            url,
+            data=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": auth_header,
+            },
+            timeout=15,
         )
+        results["registry_status"] = resp.status_code
+        try:
+            resp_data = resp.json()
+        except Exception:
+            resp_data = None
+            results["registry_raw"] = resp.text[:500]
+
+        if resp.status_code == 200 and resp_data:
+            results["registry_response_summary"] = (
+                f"{len(resp_data)} entries" if isinstance(resp_data, list) else "dict"
+            )
+            registry_key = _extract_registry_key(
+                resp_data, settings.subscriber_id, settings.unique_key_id
+            )
+            if registry_key:
+                results["registry_public_key"] = registry_key
+                results["keys_match"] = registry_key == settings.signing_public_key
+                if not results["keys_match"]:
+                    results["DIAGNOSIS"] = (
+                        "KEY MISMATCH! The public key in the ONDC registry is DIFFERENT "
+                        "from the key we use for signing.  You must re-register the correct key "
+                        "via the ONDC preprod portal, or update the local private/public "
+                        "key pair to match what is registered."
+                    )
+                else:
+                    results["DIAGNOSIS"] = (
+                        "Keys match — registry has our correct public key.  "
+                        "The Invalid Signature error may be caused by body encoding, "
+                        "digest format, or a gateway-side issue."
+                    )
+            else:
+                results["DIAGNOSIS"] = (
+                    "Registry returned 200 but no signing_public_key found for our subscriber. "
+                    "Check if we are properly registered."
+                )
+        elif resp.status_code == 401:
+            # 401 means the registry couldn't verify our signature either!
+            results["DIAGNOSIS"] = (
+                "Registry REJECTED our signed request (401). This confirms the registry "
+                "has a DIFFERENT public key than what we derived from our private key. "
+                "The key pair stored locally does NOT match the key registered in the "
+                "ONDC registry.  Re-register the correct key or generate a new key pair."
+            )
+            if resp_data:
+                results["registry_error"] = resp_data
+        else:
+            results["DIAGNOSIS"] = f"Unexpected registry response: HTTP {resp.status_code}"
+            if resp_data:
+                results["registry_error"] = resp_data
+    except Exception as e:
+        results["request_error"] = str(e)
 
     return results
 

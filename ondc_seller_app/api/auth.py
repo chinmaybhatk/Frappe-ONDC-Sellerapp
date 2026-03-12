@@ -129,6 +129,48 @@ def calculate_digest(request_body):
     return base64.b64encode(digest).decode()
 
 
+def _generate_registry_auth_header(settings, body_bytes):
+    """Generate a signed Authorization header for ONDC registry v2.0 requests.
+
+    The v2.0 registry endpoints require the same Ed25519 Signature auth
+    header used for all ONDC network communication.
+    """
+    from datetime import timedelta
+
+    digest = hashlib.blake2b(body_bytes, digest_size=64).digest()
+    digest_b64 = base64.b64encode(digest).decode()
+
+    created = int(datetime.utcnow().timestamp())
+    expires = int((datetime.utcnow() + timedelta(minutes=5)).timestamp())
+
+    signing_string = (
+        f"(created): {created}\n"
+        f"(expires): {expires}\n"
+        f"digest: BLAKE-512={digest_b64}"
+    )
+
+    priv_key_b64 = settings.get_password("signing_private_key")
+    raw_key = base64.b64decode(priv_key_b64)
+    if len(raw_key) == 64:
+        seed = raw_key[:32]
+    elif len(raw_key) == 48:
+        seed = raw_key[-32:]
+    elif len(raw_key) == 32:
+        seed = raw_key
+    else:
+        raise ValueError(f"Invalid signing key length: {len(raw_key)}")
+
+    sk = nacl.signing.SigningKey(seed)
+    signature = sk.sign(signing_string.encode()).signature
+    sig_b64 = base64.b64encode(signature).decode()
+
+    return (
+        f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
+        f'algorithm="ed25519",created="{created}",expires="{expires}",'
+        f'headers="(created) (expires) digest",signature="{sig_b64}"'
+    )
+
+
 def lookup_public_key(subscriber_id, unique_key_id):
     """
     Look up a network participant's public key from the ONDC registry.
@@ -160,18 +202,34 @@ def lookup_public_key(subscriber_id, unique_key_id):
 
         registry_url = registry_urls.get(settings.environment, registry_urls["staging"])
 
-        # Make lookup request
+        # Build payload — do NOT pass the caller's 'type'; we are BPP
+        # looking up the BAP/gateway that sent us a request.
+        import json as _json
         payload = {
             "subscriber_id": subscriber_id,
             "ukId": unique_key_id,
             "domain": settings.domain,
-            "type": "BAP"  # We are BPP, looking up BAP keys
+            "type": "BAP",
         }
+        body_bytes = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+        # The v2.0 endpoint requires a signed Authorization header
+        try:
+            auth_header = _generate_registry_auth_header(settings, body_bytes)
+        except Exception as auth_err:
+            frappe.log_error(
+                f"Cannot sign registry lookup: {auth_err}",
+                "ONDC Registry Auth",
+            )
+            return None
 
         response = requests.post(
             registry_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
+            data=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": auth_header,
+            },
             timeout=10,
         )
 
