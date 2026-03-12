@@ -128,64 +128,16 @@ class ONDCOrder(Document):
     @frappe.whitelist()
     def update_fulfillment_status(self, status, tracking_url=None):
         """
-        Update fulfillment status and send on_status callback to ONDC network.
-        Uses granular fulfillment states from the ONDC protocol.
-        """
-        from ondc_seller_app.api.ondc_client import ONDCClient
+        Update fulfillment status locally.
 
-        # Update tracking URL if provided
+        NOTE: on_status callbacks are now ONLY sent by process_status() in
+        webhook.py, which builds the full ONDC-compliant payload.  This
+        method must NOT send its own callback to avoid duplicate / minimal
+        responses that confuse Pramaan certification.
+        """
         if tracking_url:
             self.tracking_url = tracking_url
-            self.save(ignore_permissions=True)
 
-        settings = frappe.get_single("ONDC Settings")
-        client = ONDCClient(settings)
-
-        # Build a proper on_status request
-        context = client.create_context("on_status")
-        context["bap_id"] = self.bap_id
-        context["bap_uri"] = self.bap_uri
-        context["transaction_id"] = self.transaction_id
-
-        fulfillment_state = self.get("fulfillment_state") or "Pending"
-
-        # Build order items
-        items = []
-        for item in self.items:
-            items.append({
-                "id": item.ondc_item_id,
-                "fulfillment_id": self.fulfillment_id,
-                "quantity": {"count": int(item.quantity)},
-            })
-
-        order_payload = {
-            "id": self.ondc_order_id,
-            "state": self.order_status,
-            "provider": {"id": settings.subscriber_id},
-            "items": items,
-            "fulfillments": [
-                {
-                    "id": self.fulfillment_id,
-                    "type": self.fulfillment_type or "Delivery",
-                    "state": {
-                        "descriptor": {"code": fulfillment_state},
-                    },
-                    "tracking": bool(self.get("tracking_url")),
-                }
-            ],
-        }
-
-        if self.get("tracking_url"):
-            order_payload["fulfillments"][0]["@ondc/org/tracking_url"] = self.tracking_url
-
-        payload = {
-            "context": context,
-            "message": {"order": order_payload},
-        }
-
-        response = client.send_callback(self.bap_uri, "/on_status", payload)
-
-        if response.get("success"):
-            frappe.msgprint("Status updated on ONDC network")
-        else:
-            frappe.throw(f"Status update failed: {response.get('error')}")
+        # Just save locally – no network callback
+        self.save(ignore_permissions=True)
+        frappe.msgprint("Fulfillment status updated locally")

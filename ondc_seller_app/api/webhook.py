@@ -611,67 +611,65 @@ def send_unsolicited_on_update(data, order_name):
 def process_status(data, log_name=None):
     """Process status request and send on_status callback with ONDC-compliant structure.
 
-    Built with defensive per-stage error handling so that a failure in any
-    optional section (quote, billing, payment, fulfillment details) does NOT
-    prevent the callback from being sent.  Each stage logs its success/failure
-    to the Frappe Error Log so we can diagnose issues on Frappe Cloud.
+    v3 – Rewrote to:
+    1. Load order by *name* (not dict filter) so child tables are guaranteed.
+    2. Use db_set for fulfillment progression (no full save → no side-effects).
+    3. Build every section inline (no try/except swallowing) so errors surface.
+    4. Log the FULL payload being sent so we can see exactly what Pramaan receives.
     """
-    import datetime as dt_module  # full module for timedelta
-    from datetime import datetime  # datetime class for utcnow etc.
+    import datetime as dt_module
+    from datetime import datetime
 
-    stages_completed = []
+    trace = []  # human-readable breadcrumbs
 
-    def _log_stage(stage, success=True, detail=""):
-        stages_completed.append(f"{'✓' if success else '✗'} {stage}: {detail[:200]}")
+    def _t(msg):
+        trace.append(msg)
 
     try:
         from ondc_seller_app.api.ondc_client import ONDCClient
 
-        # ── Stage 1: Extract order_id ──
+        # ── 1. Extract order_id ──
         message = data.get("message", {})
         order_id = message.get("order", {}).get("id") or message.get("order_id")
         if not order_id:
-            _update_webhook_log(log_name, status="Failed", error_message="Missing order_id")
+            _update_webhook_log(log_name, status="Failed", error_message="Missing order_id in status")
             return
-        _log_stage("order_id", detail=order_id)
+        _t(f"1.order_id={order_id}")
 
-        # ── Stage 2: Load order ──
-        try:
-            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
-        except frappe.DoesNotExistError:
+        # ── 2. Load order BY NAME (guarantees child tables) ──
+        order_name = frappe.db.get_value("ONDC Order", {"ondc_order_id": order_id}, "name")
+        if not order_name:
             _update_webhook_log(log_name, status="Failed", error_message=f"Order not found: {order_id}")
             return
-        _log_stage("load_order", detail=f"name={order.name}, items={len(order.items or [])}")
+        order = frappe.get_doc("ONDC Order", order_name)
+        order.reload()  # force child-table reload
+        _t(f"2.loaded name={order.name} items={len(order.items or [])}")
 
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
 
-        # ── Stage 3: Auto-progress fulfillment state ──
+        # ── 3. Auto-progress fulfillment state via db_set (no full save) ──
         state_progression = [
             "Pending", "Packed", "Agent-assigned", "At-pickup",
             "Order-picked-up", "Out-for-delivery", "Order-delivered",
         ]
         current_state = order.get("fulfillment_state") or "Pending"
-        try:
-            if current_state in state_progression:
-                current_idx = state_progression.index(current_state)
-                if current_idx < len(state_progression) - 1:
-                    next_state = state_progression[current_idx + 1]
-                    order.fulfillment_state = next_state
-                    order.flags.ignore_validate = True
-                    order.save(ignore_permissions=True)
-                    frappe.db.commit()
-                    _log_stage("auto_progress", detail=f"{current_state} → {next_state}")
-                else:
-                    _log_stage("auto_progress", detail=f"already at {current_state}")
+        if current_state in state_progression:
+            idx = state_progression.index(current_state)
+            if idx < len(state_progression) - 1:
+                next_state = state_progression[idx + 1]
+                frappe.db.set_value("ONDC Order", order.name, "fulfillment_state", next_state, update_modified=False)
+                frappe.db.commit()
+                order.fulfillment_state = next_state
+                _t(f"3.progress {current_state}->{next_state}")
             else:
-                _log_stage("auto_progress", detail=f"state {current_state} not in progression")
-        except Exception as e:
-            _log_stage("auto_progress", success=False, detail=str(e))
+                _t(f"3.already_at {current_state}")
+        else:
+            _t(f"3.unknown_state {current_state}")
 
         fulfillment_state = order.get("fulfillment_state") or "Pending"
 
-        # Map fulfillment state to order state
+        # Map fulfillment state → order state
         state_map = {
             "Pending": "Accepted",
             "Packed": "In-progress",
@@ -683,84 +681,69 @@ def process_status(data, log_name=None):
             "Cancelled": "Cancelled",
         }
         order_state = state_map.get(fulfillment_state, order.order_status or "Accepted")
-        _log_stage("state_map", detail=f"fulfillment={fulfillment_state}, order_state={order_state}")
+        _t(f"4.state_map fulfillment={fulfillment_state} order={order_state}")
 
-        # ── Stage 4: Build items and quote breakup ──
-        items = []
+        # ── 4. Build items and quote breakup ──
+        items_list = []
         quote_breakup = []
         item_total = 0.0
         total_tax = 0.0
-        grand_total = 0.0
+        tax_rate = float(settings.get("default_tax_rate") or 0)
 
-        try:
-            tax_rate = float(settings.get("default_tax_rate") or 0)
+        for row in (order.items or []):
+            price_val = float(row.price or 0)
+            qty_val = int(row.quantity or 1)
+            line_total = price_val * qty_val
+            item_total += line_total
+            item_id = row.ondc_item_id or ""
 
-            for item in (order.items or []):
-                price = float(item.get("price") or item.price or 0)
-                qty = int(item.get("quantity") or item.quantity or 1)
-                line_total = price * qty
-                item_total += line_total
-
-                items.append({
-                    "id": item.get("ondc_item_id") or item.ondc_item_id or "",
-                    "fulfillment_id": order.fulfillment_id or "F1",
-                    "quantity": {"count": qty},
-                })
-
-                item_id = item.get("ondc_item_id") or item.ondc_item_id or ""
-                quote_breakup.append({
-                    "title": item_id,
-                    "@ondc/org/item_id": item_id,
-                    "@ondc/org/item_quantity": {"count": qty},
-                    "@ondc/org/title_type": "item",
-                    "price": {"currency": "INR", "value": str(line_total)},
-                    "item": {"price": {"currency": "INR", "value": str(price)}},
-                })
-
-                item_tax = round(line_total * tax_rate / 100, 2) if tax_rate > 0 else 0
-                total_tax += item_tax
-                quote_breakup.append({
-                    "title": "Tax",
-                    "@ondc/org/item_id": item_id,
-                    "@ondc/org/title_type": "tax",
-                    "price": {"currency": "INR", "value": str(item_tax)},
-                })
-
-            # Delivery, packing, convenience charges
-            delivery_charge = float(settings.get("default_delivery_charge") or 0)
-            quote_breakup.append({
-                "title": "Delivery charges",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "delivery",
-                "price": {"currency": "INR", "value": str(delivery_charge)},
+            items_list.append({
+                "id": item_id,
+                "fulfillment_id": order.fulfillment_id or "F1",
+                "quantity": {"count": qty_val},
             })
 
-            packing_charge = float(settings.get("default_packing_charge") or 0)
             quote_breakup.append({
-                "title": "Packing charges",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "packing",
-                "price": {"currency": "INR", "value": str(packing_charge)},
+                "title": item_id,
+                "@ondc/org/item_id": item_id,
+                "@ondc/org/item_quantity": {"count": qty_val},
+                "@ondc/org/title_type": "item",
+                "price": {"currency": "INR", "value": str(line_total)},
+                "item": {"price": {"currency": "INR", "value": str(price_val)}},
             })
 
-            convenience_fee = float(settings.get("convenience_fee") or 0)
+            item_tax = round(line_total * tax_rate / 100, 2) if tax_rate > 0 else 0
+            total_tax += item_tax
             quote_breakup.append({
-                "title": "Convenience Fee",
-                "@ondc/org/item_id": "F1",
-                "@ondc/org/title_type": "misc",
-                "price": {"currency": "INR", "value": str(convenience_fee)},
+                "title": "Tax",
+                "@ondc/org/item_id": item_id,
+                "@ondc/org/title_type": "tax",
+                "price": {"currency": "INR", "value": str(item_tax)},
             })
 
-            grand_total = item_total + total_tax + delivery_charge + packing_charge + convenience_fee
-            _log_stage("items_quote", detail=f"items={len(items)}, grand_total={grand_total}")
-        except Exception as e:
-            _log_stage("items_quote", success=False, detail=str(e))
-            frappe.log_error(traceback.format_exc(), "on_status items_quote error")
+        delivery_charge = float(settings.get("default_delivery_charge") or 0)
+        packing_charge = float(settings.get("default_packing_charge") or 0)
+        convenience_fee = float(settings.get("convenience_fee") or 0)
 
-        # ── Stage 5: Build fulfillment object ──
+        for title, tid, ttype, val in [
+            ("Delivery charges", "F1", "delivery", delivery_charge),
+            ("Packing charges", "F1", "packing", packing_charge),
+            ("Convenience Fee", "F1", "misc", convenience_fee),
+        ]:
+            quote_breakup.append({
+                "title": title,
+                "@ondc/org/item_id": tid,
+                "@ondc/org/title_type": ttype,
+                "price": {"currency": "INR", "value": str(val)},
+            })
+
+        grand_total = item_total + total_tax + delivery_charge + packing_charge + convenience_fee
+        _t(f"5.items={len(items_list)} grand={grand_total}")
+
+        # ── 5. Build fulfillment object ──
         now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         hour_later = (datetime.utcnow() + dt_module.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        two_hours_later = (datetime.utcnow() + dt_module.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        two_hours = (datetime.utcnow() + dt_module.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         store_gps = settings.get("store_gps") or "0.0,0.0"
         store_name = settings.get("store_name") or settings.legal_entity_name or "ONDC Seller"
@@ -806,211 +789,175 @@ def process_status(data, log_name=None):
                 {"code": "routing", "list": [{"code": "type", "value": "P2P"}]},
             ],
         }
-        _log_stage("fulfillment_base", detail=f"state={fulfillment_state}")
 
-        # ── Stage 5b: Fulfillment end location ──
-        try:
-            if order.get("shipping_gps") or order.get("shipping_address"):
+        # End location
+        end_address = {}
+        if order.get("shipping_address"):
+            try:
+                end_address = json.loads(order.shipping_address) if isinstance(order.shipping_address, str) else {}
+            except Exception:
                 end_address = {}
-                if order.get("shipping_address"):
-                    try:
-                        end_address = json.loads(order.shipping_address) if isinstance(order.shipping_address, str) else (order.shipping_address if isinstance(order.shipping_address, dict) else {})
-                    except (json.JSONDecodeError, TypeError):
-                        end_address = {}
-                fulfillment_obj["end"] = {
-                    "location": {
-                        "gps": order.get("shipping_gps") or "",
-                        "address": end_address,
-                    },
-                    "person": {"name": order.customer_name or ""},
-                    "contact": {
-                        "phone": order.customer_phone or "",
-                        "email": order.customer_email or "",
-                    },
-                    "time": {"range": {"start": now_str, "end": two_hours_later}},
-                }
-                _log_stage("fulfillment_end", detail="added")
-            else:
-                _log_stage("fulfillment_end", detail="skipped (no shipping data)")
-        except Exception as e:
-            _log_stage("fulfillment_end", success=False, detail=str(e))
 
-        # ── Stage 5c: Agent details ──
-        try:
-            agent_states = ["Agent-assigned", "At-pickup", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
-            if order.get("delivery_agent_name"):
-                fulfillment_obj["agent"] = {
-                    "name": order.delivery_agent_name,
-                    "phone": order.get("delivery_agent_phone") or "",
-                }
-            elif fulfillment_state in agent_states:
-                fulfillment_obj["agent"] = {
-                    "name": settings.get("store_name") or "Delivery Agent",
-                    "phone": settings.get("consumer_care_phone") or "9876543210",
-                }
-            _log_stage("agent", detail=f"state={fulfillment_state}, has_agent={'agent' in fulfillment_obj}")
-        except Exception as e:
-            _log_stage("agent", success=False, detail=str(e))
-
-        # ── Stage 5d: Documents ──
-        try:
-            post_pickup_states = ["Order-picked-up", "Out-for-delivery", "Order-delivered"]
-            if fulfillment_state in post_pickup_states:
-                fulfillment_obj["documents"] = [{
-                    "url": order.get("invoice_url") or f"https://{settings.subscriber_id}/invoice/{order.ondc_order_id}",
-                    "label": "Invoice",
-                }]
-            _log_stage("documents", detail=f"state={fulfillment_state}")
-        except Exception as e:
-            _log_stage("documents", success=False, detail=str(e))
-
-        # ── Stage 5e: Tracking URL ──
-        try:
-            if order.get("tracking_url"):
-                fulfillment_obj["tracking"] = True
-                fulfillment_obj["@ondc/org/tracking_url"] = order.tracking_url
-            _log_stage("tracking", detail=f"has_tracking={bool(order.get('tracking_url'))}")
-        except Exception as e:
-            _log_stage("tracking", success=False, detail=str(e))
-
-        # ── Stage 6: Build payment object ──
-        payment_obj = {}
-        try:
-            payment_obj = {
-                "type": order.payment_type or "ON-ORDER",
-                "collected_by": "BAP" if (order.payment_type or "ON-ORDER") != "ON-FULFILLMENT" else "BPP",
-                "status": "PAID" if order.get("payment_status") == "Paid" else "NOT-PAID",
-                "params": {
-                    "currency": "INR",
-                    "amount": str(round(grand_total, 2)),
-                    "transaction_id": order.get("payment_transaction_id") or order.ondc_order_id,
-                },
-                "@ondc/org/buyer_app_finder_fee_type": "percent",
-                "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
-                "@ondc/org/settlement_basis": "delivery",
-                "@ondc/org/settlement_window": "P2D",
-                "@ondc/org/withholding_amount": "0.00",
-                "@ondc/org/settlement_details": [{
-                    "settlement_counterparty": "seller-app",
-                    "settlement_phase": "sale-amount",
-                    "settlement_type": "neft",
-                    "beneficiary_name": settings.legal_entity_name or "",
-                    "settlement_bank_account_no": settings.get("settlement_bank_account") or "",
-                    "settlement_ifsc_code": settings.get("settlement_ifsc_code") or "",
-                    "bank_name": settings.get("settlement_bank_name") or "",
-                    "branch_name": settings.get("settlement_branch_name") or "",
-                }],
-            }
-            _log_stage("payment", detail=f"type={payment_obj['type']}, status={payment_obj['status']}")
-        except Exception as e:
-            _log_stage("payment", success=False, detail=str(e))
-            frappe.log_error(traceback.format_exc(), "on_status payment error")
-
-        # ── Stage 7: Extract BAP stored data ──
-        bap_data = {}
-        try:
-            raw_bap = order.get("custom_bap_data")
-            if raw_bap:
-                bap_data = json.loads(raw_bap) if isinstance(raw_bap, str) else (raw_bap if isinstance(raw_bap, dict) else {})
-            _log_stage("bap_data", detail=f"keys={list(bap_data.keys())[:5]}")
-        except Exception as e:
-            _log_stage("bap_data", success=False, detail=str(e))
-
-        # ── Stage 8: Build billing ──
-        billing_obj = {}
-        try:
-            billing_obj = {
-                "name": order.billing_name or order.customer_name or "",
-                "address": {
-                    "building": order.get("billing_building") or "",
+        fulfillment_obj["end"] = {
+            "location": {
+                "gps": order.get("shipping_gps") or store_gps,
+                "address": end_address if end_address else {
                     "locality": order.get("billing_locality") or "",
                     "city": order.get("billing_city") or "",
                     "state": order.get("billing_state") or "",
                     "country": "IND",
                     "area_code": order.get("billing_area_code") or "",
-                    "name": bap_data.get("billing_address_name") or order.billing_name or "",
                 },
-                "email": order.customer_email or "",
+            },
+            "person": {"name": order.customer_name or order.billing_name or ""},
+            "contact": {
                 "phone": order.customer_phone or "",
-                "tax_number": order.get("billing_tax_number") or "",
-                "created_at": bap_data.get("billing_created_at") or to_rfc3339(order.creation),
-                "updated_at": bap_data.get("billing_updated_at") or to_rfc3339(order.modified),
-            }
-            _log_stage("billing", detail=f"name={billing_obj['name'][:30]}")
-        except Exception as e:
-            _log_stage("billing", success=False, detail=str(e))
-            frappe.log_error(traceback.format_exc(), "on_status billing error")
+                "email": order.customer_email or "",
+            },
+            "time": {"range": {"start": now_str, "end": two_hours}},
+        }
 
-        # ── Stage 9: Assemble full order payload ──
+        # Agent (always present after Packed)
+        agent_states = ["Agent-assigned", "At-pickup", "Order-picked-up", "Out-for-delivery", "Order-delivered"]
+        if fulfillment_state in agent_states:
+            fulfillment_obj["agent"] = {
+                "name": order.get("delivery_agent_name") or store_name,
+                "phone": order.get("delivery_agent_phone") or settings.get("consumer_care_phone") or "9876543210",
+            }
+
+        # Documents (invoice after pickup)
+        post_pickup = ["Order-picked-up", "Out-for-delivery", "Order-delivered"]
+        if fulfillment_state in post_pickup:
+            fulfillment_obj["documents"] = [{
+                "url": order.get("invoice_url") or f"https://{settings.subscriber_id}/invoice/{order.ondc_order_id}",
+                "label": "Invoice",
+            }]
+
+        # Tracking
+        if order.get("tracking_url"):
+            fulfillment_obj["tracking"] = True
+            fulfillment_obj["@ondc/org/tracking_url"] = order.tracking_url
+
+        _t(f"6.fulfillment keys={sorted(fulfillment_obj.keys())}")
+
+        # ── 6. Payment ──
+        payment_type = order.payment_type or "ON-ORDER"
+        payment_obj = {
+            "type": payment_type,
+            "collected_by": "BAP" if payment_type != "ON-FULFILLMENT" else "BPP",
+            "status": "PAID" if order.get("payment_status") == "Paid" else "NOT-PAID",
+            "params": {
+                "currency": "INR",
+                "amount": str(round(grand_total, 2)),
+                "transaction_id": order.get("payment_transaction_id") or order.ondc_order_id,
+            },
+            "@ondc/org/buyer_app_finder_fee_type": "percent",
+            "@ondc/org/buyer_app_finder_fee_amount": str(settings.get("buyer_finder_fee") or "3"),
+            "@ondc/org/settlement_basis": "delivery",
+            "@ondc/org/settlement_window": "P2D",
+            "@ondc/org/withholding_amount": "0.00",
+            "@ondc/org/settlement_details": [{
+                "settlement_counterparty": "seller-app",
+                "settlement_phase": "sale-amount",
+                "settlement_type": "neft",
+                "beneficiary_name": settings.legal_entity_name or "",
+                "settlement_bank_account_no": settings.get("settlement_bank_account") or "",
+                "settlement_ifsc_code": settings.get("settlement_ifsc_code") or "",
+                "bank_name": settings.get("settlement_bank_name") or "",
+                "branch_name": settings.get("settlement_branch_name") or "",
+            }],
+        }
+        _t("7.payment_ok")
+
+        # ── 7. BAP stored data ──
+        bap_data = {}
+        raw_bap = order.get("custom_bap_data")
+        if raw_bap:
+            try:
+                bap_data = json.loads(raw_bap) if isinstance(raw_bap, str) else {}
+            except Exception:
+                bap_data = {}
+        _t(f"8.bap_keys={list(bap_data.keys())[:5]}")
+
+        # ── 8. Billing ──
+        billing_obj = {
+            "name": order.billing_name or order.customer_name or "",
+            "address": {
+                "building": order.get("billing_building") or "",
+                "locality": order.get("billing_locality") or "",
+                "city": order.get("billing_city") or "",
+                "state": order.get("billing_state") or "",
+                "country": "IND",
+                "area_code": order.get("billing_area_code") or "",
+                "name": bap_data.get("billing_address_name") or order.billing_name or "",
+            },
+            "email": order.customer_email or "",
+            "phone": order.customer_phone or "",
+            "tax_number": order.get("billing_tax_number") or "",
+            "created_at": bap_data.get("billing_created_at") or to_rfc3339(order.creation),
+            "updated_at": bap_data.get("billing_updated_at") or to_rfc3339(order.modified),
+        }
+        _t(f"9.billing name={billing_obj['name'][:30]}")
+
+        # ── 9. Assemble order payload ──
+        order_payload = {
+            "id": order.ondc_order_id,
+            "state": order_state,
+            "provider": {
+                "id": settings.subscriber_id,
+                "locations": [{"id": location_id}],
+            },
+            "items": items_list,
+            "billing": billing_obj,
+            "fulfillments": [fulfillment_obj],
+            "quote": {
+                "price": {"currency": "INR", "value": str(round(grand_total, 2))},
+                "breakup": quote_breakup,
+                "ttl": "P1D",
+            },
+            "payment": payment_obj,
+            "created_at": to_rfc3339(order.creation),
+            "updated_at": to_rfc3339(order.modified),
+        }
+        _t(f"10.payload keys={sorted(order_payload.keys())}")
+
+        # ── 10. Send callback ──
+        context = client.create_context("on_status", data.get("context"))
+        payload = {"context": context, "message": {"order": order_payload}}
+
+        # Log full payload for debugging
         try:
-            order_payload = {
-                "id": order.ondc_order_id,
-                "state": order_state,
-                "provider": {
-                    "id": settings.subscriber_id,
-                    "locations": [{"id": location_id}],
-                },
-                "items": items,
-                "billing": billing_obj,
-                "fulfillments": [fulfillment_obj],
-                "quote": {
-                    "price": {"currency": "INR", "value": str(round(grand_total, 2))},
-                    "breakup": quote_breakup,
-                    "ttl": "P1D",
-                },
-                "payment": payment_obj,
-                "created_at": to_rfc3339(order.creation),
-                "updated_at": to_rfc3339(order.modified),
-            }
-            _log_stage("order_payload", detail=f"keys={list(order_payload.keys())}")
-        except Exception as e:
-            _log_stage("order_payload", success=False, detail=str(e))
-            frappe.log_error(traceback.format_exc(), "on_status order_payload error")
-            # Fallback: minimal payload so callback still goes out
-            order_payload = {
-                "id": order.ondc_order_id,
-                "state": order_state,
-                "provider": {"id": settings.subscriber_id},
-                "items": items,
-                "fulfillments": [fulfillment_obj],
-            }
-
-        # ── Stage 10: Create context and send callback ──
-        try:
-            context = client.create_context("on_status", data.get("context"))
-            payload = {
-                "context": context,
-                "message": {"order": order_payload},
-            }
-
-            # Log the payload keys being sent for debugging
-            sent_keys = list(order_payload.keys())
-            _log_stage("send_callback", detail=f"order_keys={sent_keys}")
-
-            result = client.send_callback(
-                data.get("context", {}).get("bap_uri"),
-                "/on_status",
-                payload,
+            frappe.log_error(
+                title=f"on_status PAYLOAD {fulfillment_state}",
+                message=json.dumps(payload, indent=2, default=str)[:20000],
             )
-            _log_stage("callback_result", detail=f"success={result.get('success') if isinstance(result, dict) else 'unknown'}")
-            _update_webhook_log(log_name, status="Processed", response=result)
-        except Exception as e:
-            _log_stage("send_callback", success=False, detail=str(e))
-            frappe.log_error(traceback.format_exc(), "on_status send_callback error")
-            _update_webhook_log(log_name, status="Failed", error_message=str(e))
+        except Exception:
+            pass
 
-        # Always log the stage trace so we can see how far we got
-        frappe.log_error(
-            title="on_status stage trace",
-            message=f"Order: {order_id}, State: {fulfillment_state}\n" + "\n".join(stages_completed)
+        result = client.send_callback(
+            data.get("context", {}).get("bap_uri"),
+            "/on_status",
+            payload,
         )
+        _t(f"11.sent result={result}")
+        _update_webhook_log(log_name, status="Processed", response=result)
 
     except Exception as e:
+        _t(f"ERR: {e}")
         frappe.log_error(
-            title="ONDC process_status OUTER Error",
-            message=f"Stages: {stages_completed}\n\n{traceback.format_exc()}"
+            title="ONDC process_status Error",
+            message=f"Trace: {trace}\n\n{traceback.format_exc()}"
         )
         _update_webhook_log(log_name, status="Failed", error_message=str(e))
+    finally:
+        # Always log the trace
+        try:
+            frappe.log_error(
+                title="on_status trace",
+                message=" | ".join(trace),
+            )
+        except Exception:
+            pass
 
 
 def process_track(data, log_name=None):
@@ -1024,11 +971,11 @@ def process_track(data, log_name=None):
             _update_webhook_log(log_name, status="Failed", error_message="Missing order_id")
             return
 
-        try:
-            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
-        except frappe.DoesNotExistError:
+        order_name = frappe.db.get_value("ONDC Order", {"ondc_order_id": order_id}, "name")
+        if not order_name:
             _update_webhook_log(log_name, status="Failed", error_message=f"Order not found: {order_id}")
             return
+        order = frappe.get_doc("ONDC Order", order_name)
 
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
@@ -1086,11 +1033,11 @@ def process_cancel(data, log_name=None):
             _update_webhook_log(log_name, status="Failed", error_message="Missing order_id")
             return
 
-        try:
-            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
-        except frappe.DoesNotExistError:
+        order_name = frappe.db.get_value("ONDC Order", {"ondc_order_id": order_id}, "name")
+        if not order_name:
             _update_webhook_log(log_name, status="Failed", error_message=f"Order not found: {order_id}")
             return
+        order = frappe.get_doc("ONDC Order", order_name)
 
         if order.order_status in ("Completed", "Cancelled"):
             _update_webhook_log(log_name, status="Failed", error_message=f"Order cannot be cancelled (status: {order.order_status})")
@@ -1341,11 +1288,11 @@ def process_update(data, log_name=None):
             _update_webhook_log(log_name, status="Failed", error_message="Missing order.id in update")
             return
 
-        try:
-            order = frappe.get_doc("ONDC Order", {"ondc_order_id": order_id})
-        except frappe.DoesNotExistError:
+        order_name = frappe.db.get_value("ONDC Order", {"ondc_order_id": order_id}, "name")
+        if not order_name:
             _update_webhook_log(log_name, status="Failed", error_message=f"Order not found: {order_id}")
             return
+        order = frappe.get_doc("ONDC Order", order_name)
 
         settings = frappe.get_single("ONDC Settings")
         client = ONDCClient(settings)
