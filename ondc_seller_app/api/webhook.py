@@ -39,6 +39,80 @@ def to_rfc3339(frappe_dt):
 
 
 @frappe.whitelist(allow_guest=True)
+def signing_diagnostic():
+    """Diagnose signing issues — returns key info and self-verification result."""
+    import base64
+    import hashlib
+    import nacl.signing
+
+    settings = frappe.get_single("ONDC Settings")
+    results = {}
+
+    # 1. Check key formats
+    results["subscriber_id"] = settings.subscriber_id
+    results["unique_key_id"] = settings.unique_key_id
+    results["stored_public_key"] = settings.signing_public_key
+
+    # 2. Derive public key from private key to check consistency
+    try:
+        signing_private_key = settings.get_password("signing_private_key")
+        raw_key = base64.b64decode(signing_private_key)
+        results["private_key_raw_length"] = len(raw_key)
+
+        if len(raw_key) == 64:
+            seed = raw_key[:32]
+            results["key_format"] = "64-byte (seed+pubkey)"
+        elif len(raw_key) == 48:
+            seed = raw_key[-32:]
+            results["key_format"] = "48-byte (PKCS8-wrapped)"
+        elif len(raw_key) == 32:
+            seed = raw_key
+            results["key_format"] = "32-byte (raw seed)"
+        else:
+            results["key_format"] = f"UNKNOWN ({len(raw_key)} bytes)"
+            return results
+
+        sk = nacl.signing.SigningKey(seed)
+        derived_public_key = base64.b64encode(bytes(sk.verify_key)).decode()
+        results["derived_public_key"] = derived_public_key
+        results["keys_match"] = (derived_public_key == settings.signing_public_key)
+    except Exception as e:
+        results["key_derivation_error"] = str(e)
+        return results
+
+    # 3. Self-sign and verify test
+    try:
+        test_payload = {"test": "hello", "timestamp": "2026-01-01T00:00:00Z"}
+        body_str = json.dumps(test_payload, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.blake2b(body_str.encode(), digest_size=64).digest()
+        digest_b64 = base64.b64encode(digest).decode()
+
+        signing_string = f"(created): 1000000\n(expires): 9999999\ndigest: BLAKE-512={digest_b64}"
+        signature = sk.sign(signing_string.encode()).signature
+        sig_b64 = base64.b64encode(signature).decode()
+
+        # Verify with stored public key
+        vk = nacl.signing.VerifyKey(base64.b64decode(settings.signing_public_key))
+        vk.verify(signing_string.encode(), signature)
+        results["self_verify"] = "PASS"
+    except nacl.exceptions.BadSignatureError:
+        results["self_verify"] = "FAIL - BadSignature (key pair mismatch!)"
+    except Exception as e:
+        results["self_verify"] = f"FAIL - {str(e)}"
+
+    # 4. Show the exact auth header that would be generated
+    try:
+        from ondc_seller_app.api.ondc_client import ONDCClient
+        client = ONDCClient(settings)
+        auth_header = client.get_auth_header(test_payload)
+        results["sample_auth_header"] = auth_header[:200] + "..."
+    except Exception as e:
+        results["auth_header_error"] = str(e)
+
+    return results
+
+
+@frappe.whitelist(allow_guest=True)
 def handle_webhook(api):
     """
     Handle incoming ONDC webhooks.
