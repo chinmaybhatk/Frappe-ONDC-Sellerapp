@@ -51,9 +51,12 @@ class ONDCClient:
         if len(raw_key) == 64:
             # Full Ed25519 key (seed + public key) — take only the 32-byte seed
             raw_key = raw_key[:32]
+        elif len(raw_key) == 48:
+            # PKCS8-wrapped Ed25519 key (16-byte ASN.1 header + 32-byte seed)
+            raw_key = raw_key[-32:]
         elif len(raw_key) != 32:
             frappe.throw(
-                f"Invalid signing private key: expected 32 or 64 bytes, got {len(raw_key)}. "
+                f"Invalid signing private key: expected 32, 48, or 64 bytes, got {len(raw_key)}. "
                 "Please regenerate key pairs."
             )
 
