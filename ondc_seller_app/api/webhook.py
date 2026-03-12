@@ -2174,3 +2174,31 @@ def handle_rating(**kwargs):
 def handle_support(**kwargs):
     """Root-level /support endpoint"""
     handle_webhook("support")
+
+
+@frappe.whitelist(allow_guest=True)
+def get_recent_errors(limit=20, method_filter=None):
+    """Diagnostic: return most recent Error Log entries"""
+    filters = {}
+    if method_filter:
+        filters["method"] = ["like", f"%{method_filter}%"]
+    logs = frappe.get_all(
+        "Error Log",
+        filters=filters,
+        fields=["name", "method", "error", "creation"],
+        order_by="creation desc",
+        limit=int(limit)
+    )
+    return logs
+
+
+@frappe.whitelist(allow_guest=True)
+def get_recent_webhooks(limit=10):
+    """Diagnostic: return most recent ONDC Webhook Log entries"""
+    logs = frappe.get_all(
+        "ONDC Webhook Log",
+        fields=["name", "action", "status", "creation", "bap_id", "error_message"],
+        order_by="creation desc",
+        limit=int(limit)
+    )
+    return logs
