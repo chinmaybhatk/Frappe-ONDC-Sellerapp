@@ -45,6 +45,13 @@
   "default_delivery_charge",
   "default_packing_charge",
   "default_tax_rate",
+  "settlement_section",
+  "settlement_bank_account",
+  "settlement_ifsc_code",
+  "column_break_settlement",
+  "settlement_bank_name",
+  "settlement_branch_name",
+  "convenience_fee",
   "fulfillment_section",
   "support_delivery",
   "support_pickup",
@@ -279,6 +286,41 @@
    "fieldname": "default_tax_rate",
    "fieldtype": "Float",
    "label": "Default Tax Rate %",
+   "default": "0"
+  },
+  {
+   "fieldname": "settlement_section",
+   "fieldtype": "Section Break",
+   "label": "Settlement Details"
+  },
+  {
+   "fieldname": "settlement_bank_account",
+   "fieldtype": "Data",
+   "label": "Settlement Bank Account No"
+  },
+  {
+   "fieldname": "settlement_ifsc_code",
+   "fieldtype": "Data",
+   "label": "Settlement IFSC Code"
+  },
+  {
+   "fieldname": "column_break_settlement",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "settlement_bank_name",
+   "fieldtype": "Data",
+   "label": "Settlement Bank Name"
+  },
+  {
+   "fieldname": "settlement_branch_name",
+   "fieldtype": "Data",
+   "label": "Settlement Branch Name"
+  },
+  {
+   "fieldname": "convenience_fee",
+   "fieldtype": "Currency",
+   "label": "Convenience Fee",
    "default": "0"
   },
   {

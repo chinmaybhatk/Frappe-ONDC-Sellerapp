@@ -278,10 +278,14 @@ def process_confirm(data, log_name=None):
                 "price": float(item_data.get("price", {}).get("value", 0)),
             })
         
+        # Billing tax number (GSTIN) from billing object
+        order.billing_tax_number = billing.get("tax_number") or billing.get("tax_id") or ""
+
         # Payment details
         payment = order_data.get("payment", {})
         order.payment_type = _map_payment_type(payment.get("type"))
         order.payment_status = "Paid" if payment.get("status") == "PAID" else "Pending"
+        order.payment_transaction_id = payment.get("params", {}).get("transaction_id") or ""
         
         # Cancellation fields
         cancellation = order_data.get("cancellation", {})

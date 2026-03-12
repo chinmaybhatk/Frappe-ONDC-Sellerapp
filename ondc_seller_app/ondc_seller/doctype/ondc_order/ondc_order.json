@@ -37,6 +37,13 @@
   "shipping_gps",
   "shipping_address",
   "tracking_url",
+  "delivery_section",
+  "delivery_agent_name",
+  "delivery_agent_phone",
+  "column_break_delivery",
+  "invoice_url",
+  "billing_tax_number",
+  "payment_transaction_id",
   "items_section",
   "items",
   "payment_section",
@@ -207,6 +214,45 @@
    "fieldtype": "Data",
    "label": "Tracking URL",
    "description": "Tracking URL for shipment"
+  },
+  {
+   "fieldname": "delivery_section",
+   "fieldtype": "Section Break",
+   "label": "Delivery Agent & Documents"
+  },
+  {
+   "fieldname": "delivery_agent_name",
+   "fieldtype": "Data",
+   "label": "Delivery Agent Name",
+   "description": "Name of the delivery person (auto-filled or manual)"
+  },
+  {
+   "fieldname": "delivery_agent_phone",
+   "fieldtype": "Data",
+   "label": "Delivery Agent Phone",
+   "description": "Phone number of the delivery person"
+  },
+  {
+   "fieldname": "column_break_delivery",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "invoice_url",
+   "fieldtype": "Data",
+   "label": "Invoice URL",
+   "description": "URL to the order invoice document"
+  },
+  {
+   "fieldname": "billing_tax_number",
+   "fieldtype": "Data",
+   "label": "Billing Tax Number (GSTIN)",
+   "description": "Customer's GST number from billing info"
+  },
+  {
+   "fieldname": "payment_transaction_id",
+   "fieldtype": "Data",
+   "label": "Payment Transaction ID",
+   "description": "Payment gateway transaction reference"
   },
   {
    "fieldname": "items_section",
