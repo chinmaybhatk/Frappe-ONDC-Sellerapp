@@ -467,7 +467,6 @@ class ONDCClient:
     def construct_on_search(self, search_params):
         """Construct on_search callback body"""
         try:
-            bpp_details = frappe.get_doc("ONDC BPP Settings", self.settings.name)
             response_body = {
                 "context": {
                     "domain": search_params["context"]["domain"],
@@ -484,7 +483,7 @@ class ONDCClient:
                     "bpp_uri": self.settings.subscriber_url,
                 },
                 "message": {
-                    "catalog": self._get_catalog(bpp_details),
+                    "catalog": self._get_catalog(),
                 },
             }
             return response_body
@@ -795,44 +794,73 @@ class ONDCClient:
             )
             raise
 
-    def _get_catalog(self, bpp_details):
-        """Construct catalog from BPP items"""
+    def _get_catalog(self):
+        """Construct catalog from ONDC Products"""
         try:
-            items = frappe.get_list("ONDC Item", filters={"bpp": bpp_details.name})
-            providers = {}
+            products = frappe.get_all(
+                "ONDC Product",
+                filters={"is_active": 1},
+                fields=["name", "ondc_product_id", "product_name", "short_desc", "long_desc", "price", "category_code", "fulfillment_id", "available_quantity", "maximum_quantity"]
+            )
 
-            for item in items:
-                item_doc = frappe.get_doc("ONDC Item", item.name)
-                provider_id = item_doc.provider
-
-                if provider_id not in providers:
-                    provider_doc = frappe.get_doc("ONDC Provider", provider_id)
-                    providers[provider_id] = {
-                        "id": provider_id,
-                        "descriptor": {
-                            "name": provider_doc.provider_name,
-                            "short_desc": provider_doc.short_description,
-                            "long_desc": provider_doc.long_description,
+            items = []
+            for product in products:
+                items.append({
+                    "id": product.ondc_product_id or product.name,
+                    "descriptor": {
+                        "name": product.product_name,
+                        "short_desc": product.short_desc or "",
+                        "long_desc": product.long_desc or "",
+                        "images": [self.settings.store_logo] if self.settings.store_logo else [],
+                    },
+                    "price": {
+                        "currency": "INR",
+                        "value": str(product.price or 0),
+                        "maximum_value": str(product.price or 0),
+                    },
+                    "category_id": product.category_code or "Grocery",
+                    "fulfillment_id": product.fulfillment_id or "F1",
+                    "quantity": {
+                        "available": {
+                            "count": str(product.available_quantity or 0),
                         },
-                        "items": [],
-                    }
-
-                providers[provider_id]["items"].append(
-                    {
-                        "id": item_doc.name,
-                        "descriptor": {
-                            "name": item_doc.item_name,
-                            "short_desc": item_doc.short_description,
-                            "long_desc": item_doc.long_description,
+                        "maximum": {
+                            "count": str(product.maximum_quantity or 10),
                         },
-                        "price": {
-                            "currency": "INR",
-                            "value": str(item_doc.price),
-                        },
-                    }
-                )
+                    },
+                })
 
-            return {"bpp_providers": list(providers.values())}
+            # Build provider using store info from ONDC Settings
+            provider = {
+                "id": self.settings.subscriber_id,
+                "descriptor": {
+                    "name": self.settings.store_name or self.settings.subscriber_id,
+                    "short_desc": self.settings.store_short_desc or "",
+                    "long_desc": self.settings.store_long_desc or "",
+                    "images": [self.settings.store_logo] if self.settings.store_logo else [],
+                },
+                "locations": [{
+                    "id": "L1",
+                    "gps": self.settings.store_gps or "",
+                    "address": {
+                        "locality": self.settings.store_locality or "",
+                        "city": self.settings.store_city_name or "",
+                        "state": self.settings.store_state or "",
+                        "area_code": self.settings.store_area_code or "",
+                    },
+                }],
+                "fulfillments": [{
+                    "id": "F1",
+                    "type": "Delivery",
+                    "contact": {
+                        "phone": self.settings.consumer_care_phone or "",
+                        "email": self.settings.consumer_care_email or "",
+                    },
+                }],
+                "items": items,
+            }
+
+            return {"bpp/providers": [provider]}
         except Exception as e:
             frappe.log_error(f"Error fetching catalog: {str(e)}", "ONDC Catalog")
             raise
