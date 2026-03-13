@@ -2443,3 +2443,198 @@ def send_test_on_search():
         return {"success": True, "result": result}
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
+@frappe.whitelist(allow_guest=True)
+def vlookup_gateway_diagnostic():
+    """NEW v2 diagnostic (bypasses module cache): vlookup + gateway test + signing self-check.
+
+    Three checks in one call:
+    1. /vlookup (exact path the ONDC gateway uses: country+domain+city+subscriber_id+ukId)
+    2. /v2.0/lookup (broader, for key + status inspection)
+    3. Direct on_search POST to pre-prod.gcr.ondc.org to capture exact gateway response
+    """
+    import base64
+    import hashlib
+    import nacl.signing
+    import requests as _http
+    import uuid as _uuid
+    from datetime import datetime as _dt, timedelta as _td
+
+    settings = frappe.get_single("ONDC Settings")
+    results = {
+        "version": "vlookup_gateway_diagnostic_v1",
+        "subscriber_id": settings.subscriber_id,
+        "unique_key_id": settings.unique_key_id,
+        "local_public_key": settings.signing_public_key,
+        "environment": settings.environment,
+    }
+
+    registry_base = {
+        "staging": "https://staging.registry.ondc.org",
+        "preprod": "https://preprod.registry.ondc.org",
+        "prod": "https://prod.registry.ondc.org",
+    }.get(settings.environment, "https://preprod.registry.ondc.org")
+
+    def _make_auth(body_bytes_inner):
+        digest_inner = hashlib.blake2b(body_bytes_inner, digest_size=64).digest()
+        digest_b64_inner = base64.b64encode(digest_inner).decode()
+        ts_created = int(_dt.utcnow().timestamp())
+        ts_expires = int((_dt.utcnow() + _td(minutes=5)).timestamp())
+        ss = (f"(created): {ts_created}\n"
+              f"(expires): {ts_expires}\n"
+              f"digest: BLAKE-512={digest_b64_inner}")
+        priv_key_b64 = settings.get_password("signing_private_key")
+        raw_key = base64.b64decode(priv_key_b64)
+        if len(raw_key) == 64:
+            seed = raw_key[:32]
+        elif len(raw_key) == 32:
+            seed = raw_key
+        else:
+            seed = raw_key[-32:]
+        sk = nacl.signing.SigningKey(seed)
+        sig = sk.sign(ss.encode()).signature
+        sig_b64 = base64.b64encode(sig).decode()
+        hdr = (f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
+               f'algorithm="ed25519",created="{ts_created}",expires="{ts_expires}",'
+               f'headers="(created) (expires) digest",signature="{sig_b64}"')
+        vk = nacl.signing.VerifyKey(base64.b64decode(settings.signing_public_key))
+        try:
+            vk.verify(ss.encode(), sig)
+            sv = "PASS"
+        except Exception as sve:
+            sv = f"FAIL:{sve}"
+        return hdr, sv, ss
+
+    # ── 1. /vlookup — exact path the ONDC gateway uses ───────────────────
+    vlookup_payload = {
+        "country": "IND",
+        "domain": settings.domain,
+        "type": "BPP",
+        "city": settings.city or "std:080",
+        "subscriber_id": settings.subscriber_id,
+        "ukId": settings.unique_key_id,
+    }
+    vl_bytes = json.dumps(vlookup_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    results["vlookup_request"] = json.dumps(vlookup_payload)
+    try:
+        vl_auth, vl_sv, _ = _make_auth(vl_bytes)
+        results["vlookup_self_verify"] = vl_sv
+        vl_resp = _http.post(
+            f"{registry_base}/vlookup",
+            data=vl_bytes,
+            headers={"Content-Type": "application/json", "Authorization": vl_auth},
+            timeout=15,
+        )
+        results["vlookup_status"] = vl_resp.status_code
+        try:
+            vl_data = vl_resp.json()
+            results["vlookup_count"] = len(vl_data) if isinstance(vl_data, list) else "dict"
+            results["vlookup_raw"] = json.dumps(vl_data)[:1000]
+            if isinstance(vl_data, list) and len(vl_data) == 0:
+                results["VLOOKUP_DIAGNOSIS"] = (
+                    "EMPTY — gateway cannot find our BPP. "
+                    "city/domain/country/ukId don't match registry exactly. "
+                    "Gateway will ALWAYS return 401 until this is fixed in ONDC portal."
+                )
+            elif isinstance(vl_data, list) and len(vl_data) > 0:
+                entry = vl_data[0]
+                results["vlookup_signing_key"] = entry.get("signing_public_key", "")
+                results["vlookup_status_field"] = entry.get("status", "")
+                results["vlookup_ukId"] = entry.get("ukId", "")
+                results["vlookup_city"] = entry.get("city", "")
+                results["vlookup_domain"] = entry.get("domain", "")
+                results["vlookup_keys_match"] = (
+                    entry.get("signing_public_key") == settings.signing_public_key
+                )
+                results["VLOOKUP_DIAGNOSIS"] = (
+                    f"FOUND — status={entry.get('status')}, "
+                    f"keys_match={entry.get('signing_public_key') == settings.signing_public_key}, "
+                    f"ukId={entry.get('ukId')}"
+                )
+        except Exception as je:
+            results["vlookup_raw"] = vl_resp.text[:500]
+            results["vlookup_json_error"] = str(je)
+    except Exception as e:
+        results["vlookup_error"] = str(e)
+
+    # ── 2. /v2.0/lookup — broader, for key + status inspection ───────────
+    lookup_payload = {
+        "subscriber_id": settings.subscriber_id,
+        "type": "BPP",
+        "domain": settings.domain,
+    }
+    body_bytes = json.dumps(lookup_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    try:
+        auth_header, self_verify, _ = _make_auth(body_bytes)
+        results["self_verify"] = self_verify
+        resp = _http.post(
+            f"{registry_base}/v2.0/lookup",
+            data=body_bytes,
+            headers={"Content-Type": "application/json", "Authorization": auth_header},
+            timeout=15,
+        )
+        results["registry_status"] = resp.status_code
+        try:
+            resp_data = resp.json()
+            results["registry_response_summary"] = (
+                f"{len(resp_data)} entries" if isinstance(resp_data, list) else "dict"
+            )
+            if isinstance(resp_data, list) and len(resp_data) > 0:
+                entry0 = resp_data[0]
+                results["registry_full_entry"] = json.dumps(entry0)[:1200]
+                results["registry_status_field"] = entry0.get("status")
+                results["registry_ukId"] = entry0.get("ukId") or entry0.get("unique_key_id")
+                results["registry_city"] = entry0.get("city")
+                results["registry_domain"] = entry0.get("domain")
+                results["registry_public_key"] = entry0.get("signing_public_key", "")
+                results["keys_match"] = (
+                    entry0.get("signing_public_key") == settings.signing_public_key
+                )
+        except Exception:
+            results["registry_raw"] = resp.text[:500]
+    except Exception as e:
+        results["lookup_error"] = str(e)
+
+    # ── 3. Direct gateway test — POST minimal on_search ──────────────────
+    try:
+        gw_payload = {
+            "context": {
+                "domain": settings.domain or "ONDC:RET11",
+                "country": "IND",
+                "city": settings.city or "std:080",
+                "action": "on_search",
+                "core_version": "1.2.0",
+                "bap_id": "pramaan.ondc.org",
+                "bap_uri": "https://pre-prod.gcr.ondc.org",
+                "bpp_id": settings.subscriber_id,
+                "bpp_uri": settings.subscriber_url,
+                "transaction_id": str(_uuid.uuid4()),
+                "message_id": str(_uuid.uuid4()),
+                "timestamp": _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "ttl": "PT30S",
+            },
+            "message": {"catalog": {}}
+        }
+        gw_bytes = json.dumps(gw_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        gw_auth, gw_sv, gw_ss = _make_auth(gw_bytes)
+        results["gateway_self_verify"] = gw_sv
+        results["gateway_signing_string"] = gw_ss
+        results["gateway_auth_header"] = gw_auth
+        gw_resp = _http.post(
+            "https://pre-prod.gcr.ondc.org/on_search",
+            data=gw_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": gw_auth,
+            },
+            timeout=15,
+        )
+        results["gateway_status"] = gw_resp.status_code
+        results["gateway_response"] = gw_resp.text[:1000]
+        results["gateway_response_headers"] = dict(gw_resp.headers)
+    except Exception as e:
+        results["gateway_error"] = str(e)
+
+    return results
