@@ -114,19 +114,18 @@ def signing_diagnostic():
 
 @frappe.whitelist(allow_guest=True)
 def registry_lookup_diagnostic():
-    """Look up our OWN key from the ONDC registry to detect key mismatch.
+    """Full diagnostic: vlookup + gateway test + signing self-check.
 
-    The ONDC gateway verifies our signatures by looking up our public key
-    from the registry.  If the registry has a different key than what we
-    use for signing, every callback will get 401 Invalid Signature.
-
-    The v2.0 registry endpoint requires a signed Authorization header,
-    so we sign the lookup request with our own key.
+    Runs three checks in one call:
+    1. /vlookup (exactly what the gateway uses) to see if our entry is found
+    2. /v2.0/lookup to inspect key + status
+    3. Direct on_search POST to the gateway to capture exact 401 response
     """
     import base64
     import hashlib
     import nacl.signing
     import requests as http_requests
+    import uuid as _uuid
     from datetime import datetime as _dt, timedelta as _td
 
     settings = frappe.get_single("ONDC Settings")
@@ -143,68 +142,97 @@ def registry_lookup_diagnostic():
         "prod": "https://prod.registry.ondc.org",
     }.get(settings.environment, "https://preprod.registry.ondc.org")
 
-    # ── Build the signed lookup request ──────────────────────────────
+    # ── Helper: build signed auth header for any body bytes ──────────
+    def _make_auth(body_bytes_inner):
+        digest_inner = hashlib.blake2b(body_bytes_inner, digest_size=64).digest()
+        digest_b64_inner = base64.b64encode(digest_inner).decode()
+        ts_created = int(_dt.utcnow().timestamp())
+        ts_expires = int((_dt.utcnow() + _td(minutes=5)).timestamp())
+        ss = (f"(created): {ts_created}\n"
+              f"(expires): {ts_expires}\n"
+              f"digest: BLAKE-512={digest_b64_inner}")
+        priv_key_b64 = settings.get_password("signing_private_key")
+        raw_key = base64.b64decode(priv_key_b64)
+        if len(raw_key) == 64:
+            seed = raw_key[:32]
+        elif len(raw_key) == 32:
+            seed = raw_key
+        else:
+            seed = raw_key[-32:]
+        sk = nacl.signing.SigningKey(seed)
+        sig = sk.sign(ss.encode()).signature
+        sig_b64 = base64.b64encode(sig).decode()
+        hdr = (f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
+               f'algorithm="ed25519",created="{ts_created}",expires="{ts_expires}",'
+               f'headers="(created) (expires) digest",signature="{sig_b64}"')
+        # also self-verify
+        vk = nacl.signing.VerifyKey(base64.b64decode(settings.signing_public_key))
+        try:
+            vk.verify(ss.encode(), sig)
+            sv = "PASS"
+        except Exception as sve:
+            sv = f"FAIL:{sve}"
+        return hdr, sv, ss
+
+    # ── 1. /vlookup — this is what the ONDC gateway uses ─────────────
+    vlookup_payload = {
+        "country": "IND",
+        "domain": settings.domain,
+        "type": "BPP",
+        "city": settings.city or "std:080",
+        "subscriber_id": settings.subscriber_id,
+        "ukId": settings.unique_key_id,
+    }
+    vl_bytes = json.dumps(vlookup_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    try:
+        vl_auth, vl_sv, _ = _make_auth(vl_bytes)
+        results["vlookup_self_verify"] = vl_sv
+        vl_resp = http_requests.post(
+            f"{registry_base}/vlookup",
+            data=vl_bytes,
+            headers={"Content-Type": "application/json", "Authorization": vl_auth},
+            timeout=15,
+        )
+        results["vlookup_status"] = vl_resp.status_code
+        try:
+            vl_data = vl_resp.json()
+            results["vlookup_count"] = len(vl_data) if isinstance(vl_data, list) else "dict"
+            results["vlookup_raw"] = json.dumps(vl_data)[:800]
+            if isinstance(vl_data, list) and len(vl_data) == 0:
+                results["VLOOKUP_DIAGNOSIS"] = (
+                    "vlookup returned EMPTY — gateway cannot find our BPP entry. "
+                    "This means city/domain/country/ukId do not exactly match registry. "
+                    "The gateway will ALWAYS return 401 until vlookup finds our entry."
+                )
+            elif isinstance(vl_data, list) and len(vl_data) > 0:
+                entry = vl_data[0]
+                results["vlookup_signing_key"] = entry.get("signing_public_key", "")
+                results["vlookup_status_field"] = entry.get("status", "")
+                results["vlookup_ukId"] = entry.get("ukId", "")
+                results["vlookup_keys_match"] = entry.get("signing_public_key") == settings.signing_public_key
+                results["VLOOKUP_DIAGNOSIS"] = (
+                    f"vlookup found entry: status={entry.get('status')}, "
+                    f"keys_match={entry.get('signing_public_key') == settings.signing_public_key}"
+                )
+        except Exception:
+            results["vlookup_raw"] = vl_resp.text[:500]
+    except Exception as e:
+        results["vlookup_error"] = str(e)
+
+    # ── 2. /v2.0/lookup — broader lookup for key inspection ──────────
     lookup_payload = {
         "subscriber_id": settings.subscriber_id,
         "type": "BPP",
         "domain": settings.domain,
     }
-    body_str = json.dumps(lookup_payload, separators=(",", ":"), ensure_ascii=False)
-    body_bytes = body_str.encode("utf-8")
-
-    # Digest
-    digest = hashlib.blake2b(body_bytes, digest_size=64).digest()
-    digest_b64 = base64.b64encode(digest).decode()
-
-    # Timestamps
-    created = int(_dt.utcnow().timestamp())
-    expires = int((_dt.utcnow() + _td(minutes=5)).timestamp())
-
-    # Signing string
-    signing_string = (
-        f"(created): {created}\n"
-        f"(expires): {expires}\n"
-        f"digest: BLAKE-512={digest_b64}"
-    )
-
-    # Sign with our key
+    body_bytes = json.dumps(lookup_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     try:
-        priv_key_b64 = settings.get_password("signing_private_key")
-        raw_key = base64.b64decode(priv_key_b64)
-        if len(raw_key) == 64:
-            seed = raw_key[:32]
-        elif len(raw_key) == 48:
-            seed = raw_key[-32:]
-        elif len(raw_key) == 32:
-            seed = raw_key
-        else:
-            results["error"] = f"Bad private key length: {len(raw_key)}"
-            return results
-        sk = nacl.signing.SigningKey(seed)
-        signature = sk.sign(signing_string.encode()).signature
-        sig_b64 = base64.b64encode(signature).decode()
-    except Exception as e:
-        results["signing_error"] = str(e)
-        return results
-
-    auth_header = (
-        f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
-        f'algorithm="ed25519",created="{created}",expires="{expires}",'
-        f'headers="(created) (expires) digest",signature="{sig_b64}"'
-    )
-
-    results["auth_header_sent"] = auth_header[:120] + "..."
-
-    # ── Hit the v2.0 lookup endpoint with the signed request ─────────
-    url = f"{registry_base}/v2.0/lookup"
-    try:
+        auth_header, self_verify, _ = _make_auth(body_bytes)
+        results["self_verify"] = self_verify
         resp = http_requests.post(
-            url,
+            f"{registry_base}/v2.0/lookup",
             data=body_bytes,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": auth_header,
-            },
+            headers={"Content-Type": "application/json", "Authorization": auth_header},
             timeout=15,
         )
         results["registry_status"] = resp.status_code
@@ -218,67 +246,64 @@ def registry_lookup_diagnostic():
             results["registry_response_summary"] = (
                 f"{len(resp_data)} entries" if isinstance(resp_data, list) else "dict"
             )
-            # Also extract the full registry entry to check status, type, etc.
             registry_entry = _extract_registry_entry(
                 resp_data, settings.subscriber_id, settings.unique_key_id
             )
             if registry_entry:
                 results["registry_status_field"] = registry_entry.get("status")
                 results["registry_type"] = registry_entry.get("type")
-                results["registry_subscriber_id"] = registry_entry.get("subscriber_id")
                 results["registry_ukId"] = registry_entry.get("ukId") or registry_entry.get("unique_key_id")
                 results["registry_entry_keys"] = list(registry_entry.keys())
-
+                results["registry_full_entry"] = json.dumps(registry_entry)[:1000]
             registry_key = _extract_registry_key(
                 resp_data, settings.subscriber_id, settings.unique_key_id
             )
             if registry_key:
                 results["registry_public_key"] = registry_key
                 results["keys_match"] = registry_key == settings.signing_public_key
-                if not results["keys_match"]:
-                    results["DIAGNOSIS"] = (
-                        "KEY MISMATCH! The public key in the ONDC registry is DIFFERENT "
-                        "from the key we use for signing.  You must re-register the correct key "
-                        "via the ONDC preprod portal, or update the local private/public "
-                        "key pair to match what is registered."
-                    )
-                else:
-                    reg_status = (registry_entry or {}).get("status", "unknown")
-                    if reg_status and reg_status.lower() not in ("subscribed", "active", "approved"):
-                        results["DIAGNOSIS"] = (
-                            f"Keys match BUT registry status is '{reg_status}' (not SUBSCRIBED/ACTIVE). "
-                            "The ONDC gateway rejects callbacks from BPPs that are not in SUBSCRIBED "
-                            "status, even if the signature is mathematically correct. "
-                            "You need to complete the ONDC preprod registration process to get "
-                            "your subscriber status updated to SUBSCRIBED."
-                        )
-                    else:
-                        results["DIAGNOSIS"] = (
-                            "Keys match — registry has our correct public key.  "
-                            "The Invalid Signature error may be caused by body encoding, "
-                            "digest format, or a gateway-side issue."
-                        )
-            else:
-                results["DIAGNOSIS"] = (
-                    "Registry returned 200 but no signing_public_key found for our subscriber. "
-                    "Check if we are properly registered."
-                )
-        elif resp.status_code == 401:
-            # 401 means the registry couldn't verify our signature either!
-            results["DIAGNOSIS"] = (
-                "Registry REJECTED our signed request (401). This confirms the registry "
-                "has a DIFFERENT public key than what we derived from our private key. "
-                "The key pair stored locally does NOT match the key registered in the "
-                "ONDC registry.  Re-register the correct key or generate a new key pair."
-            )
-            if resp_data:
-                results["registry_error"] = resp_data
-        else:
-            results["DIAGNOSIS"] = f"Unexpected registry response: HTTP {resp.status_code}"
-            if resp_data:
-                results["registry_error"] = resp_data
     except Exception as e:
-        results["request_error"] = str(e)
+        results["lookup_error"] = str(e)
+
+    # ── 3. Direct gateway test — POST minimal on_search ──────────────
+    try:
+        gw_payload = {
+            "context": {
+                "domain": settings.domain or "ONDC:RET11",
+                "country": "IND",
+                "city": settings.city or "std:080",
+                "action": "on_search",
+                "core_version": "1.2.0",
+                "bap_id": "pramaan.ondc.org",
+                "bap_uri": "https://pre-prod.gcr.ondc.org",
+                "bpp_id": settings.subscriber_id,
+                "bpp_uri": settings.subscriber_url,
+                "transaction_id": str(_uuid.uuid4()),
+                "message_id": str(_uuid.uuid4()),
+                "timestamp": _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "ttl": "PT30S",
+            },
+            "message": {"catalog": {}}
+        }
+        gw_bytes = json.dumps(gw_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        gw_auth, gw_sv, gw_ss = _make_auth(gw_bytes)
+        results["gateway_self_verify"] = gw_sv
+        results["gateway_signing_string"] = gw_ss
+        results["gateway_auth_header"] = gw_auth
+        gw_resp = http_requests.post(
+            "https://pre-prod.gcr.ondc.org/on_search",
+            data=gw_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": gw_auth,
+            },
+            timeout=15,
+        )
+        results["gateway_status"] = gw_resp.status_code
+        results["gateway_response"] = gw_resp.text[:1000]
+        results["gateway_response_headers"] = dict(gw_resp.headers)
+    except Exception as e:
+        results["gateway_error"] = str(e)
 
     return results
 
