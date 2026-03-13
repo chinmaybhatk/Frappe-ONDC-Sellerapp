@@ -218,6 +218,17 @@ def registry_lookup_diagnostic():
             results["registry_response_summary"] = (
                 f"{len(resp_data)} entries" if isinstance(resp_data, list) else "dict"
             )
+            # Also extract the full registry entry to check status, type, etc.
+            registry_entry = _extract_registry_entry(
+                resp_data, settings.subscriber_id, settings.unique_key_id
+            )
+            if registry_entry:
+                results["registry_status_field"] = registry_entry.get("status")
+                results["registry_type"] = registry_entry.get("type")
+                results["registry_subscriber_id"] = registry_entry.get("subscriber_id")
+                results["registry_ukId"] = registry_entry.get("ukId") or registry_entry.get("unique_key_id")
+                results["registry_entry_keys"] = list(registry_entry.keys())
+
             registry_key = _extract_registry_key(
                 resp_data, settings.subscriber_id, settings.unique_key_id
             )
@@ -232,11 +243,21 @@ def registry_lookup_diagnostic():
                         "key pair to match what is registered."
                     )
                 else:
-                    results["DIAGNOSIS"] = (
-                        "Keys match — registry has our correct public key.  "
-                        "The Invalid Signature error may be caused by body encoding, "
-                        "digest format, or a gateway-side issue."
-                    )
+                    reg_status = (registry_entry or {}).get("status", "unknown")
+                    if reg_status and reg_status.lower() not in ("subscribed", "active", "approved"):
+                        results["DIAGNOSIS"] = (
+                            f"Keys match BUT registry status is '{reg_status}' (not SUBSCRIBED/ACTIVE). "
+                            "The ONDC gateway rejects callbacks from BPPs that are not in SUBSCRIBED "
+                            "status, even if the signature is mathematically correct. "
+                            "You need to complete the ONDC preprod registration process to get "
+                            "your subscriber status updated to SUBSCRIBED."
+                        )
+                    else:
+                        results["DIAGNOSIS"] = (
+                            "Keys match — registry has our correct public key.  "
+                            "The Invalid Signature error may be caused by body encoding, "
+                            "digest format, or a gateway-side issue."
+                        )
             else:
                 results["DIAGNOSIS"] = (
                     "Registry returned 200 but no signing_public_key found for our subscriber. "
@@ -262,23 +283,30 @@ def registry_lookup_diagnostic():
     return results
 
 
-def _extract_registry_key(data, subscriber_id, unique_key_id):
-    """Extract signing_public_key from registry lookup response."""
+def _extract_registry_entry(data, subscriber_id, unique_key_id):
+    """Extract the full registry entry dict for our subscriber."""
     if isinstance(data, list):
         for item in data:
             sid = item.get("subscriber_id", "")
             ukid = item.get("ukId") or item.get("unique_key_id", "")
             if sid == subscriber_id and ukid == unique_key_id:
-                return item.get("signing_public_key")
+                return item
         # Fallback: first entry matching subscriber_id
         for item in data:
             if item.get("subscriber_id") == subscriber_id:
-                return item.get("signing_public_key")
-        # Last resort: first entry
+                return item
         if data:
-            return data[0].get("signing_public_key")
+            return data[0]
     elif isinstance(data, dict):
-        return data.get("signing_public_key")
+        return data
+    return None
+
+
+def _extract_registry_key(data, subscriber_id, unique_key_id):
+    """Extract signing_public_key from registry lookup response."""
+    entry = _extract_registry_entry(data, subscriber_id, unique_key_id)
+    if entry:
+        return entry.get("signing_public_key")
     return None
 
 
@@ -2233,6 +2261,120 @@ def get_error_logs_exact(method_name, limit=10):
         return {"success": True, "count": len(rows), "rows": rows}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@frappe.whitelist(allow_guest=True)
+def gateway_callback_diagnostic():
+    """Diagnostic: send a minimal on_search to pre-prod.gcr.ondc.org and return
+    the exact Authorization header we send plus the full gateway response body.
+    This helps identify why we get HTTP 401 from the ONDC gateway."""
+    import base64, hashlib, nacl.signing, requests as http_requests
+    from datetime import datetime as _dt, timedelta as _td
+
+    try:
+        settings = frappe.get_single("ONDC Settings")
+        results = {
+            "subscriber_id": settings.subscriber_id,
+            "unique_key_id": settings.unique_key_id,
+            "subscriber_url": settings.subscriber_url,
+        }
+
+        # Build a minimal on_search payload (what we'd send to the gateway)
+        import uuid as _uuid
+        payload = {
+            "context": {
+                "domain": "ONDC:RET11",
+                "country": "IND",
+                "city": "std:080",
+                "action": "on_search",
+                "core_version": "1.2.0",
+                "bap_id": "pramaan.ondc.org",
+                "bap_uri": "https://pre-prod.gcr.ondc.org",
+                "bpp_id": settings.subscriber_id,
+                "bpp_uri": settings.subscriber_url,
+                "transaction_id": str(_uuid.uuid4()),
+                "message_id": str(_uuid.uuid4()),
+                "timestamp": _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "ttl": "PT30S",
+            },
+            "message": {"catalog": {}}
+        }
+
+        # Serialize exactly as send_callback does
+        body_bytes = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
+        body_str = body_bytes.decode('utf-8')
+        results["body_length"] = len(body_bytes)
+        results["body_preview"] = body_str[:200]
+
+        # Compute digest
+        digest = hashlib.blake2b(body_bytes, digest_size=64).digest()
+        digest_b64 = base64.b64encode(digest).decode()
+        results["digest_b64"] = digest_b64
+
+        # Build signing string
+        created = int(_dt.utcnow().timestamp())
+        expires = int((_dt.utcnow() + _td(minutes=5)).timestamp())
+        signing_string = (
+            f"(created): {created}\n"
+            f"(expires): {expires}\n"
+            f"digest: BLAKE-512={digest_b64}"
+        )
+        results["signing_string"] = signing_string
+
+        # Sign
+        priv_key_b64 = settings.get_password("signing_private_key")
+        raw_key = base64.b64decode(priv_key_b64)
+        if len(raw_key) == 64:
+            seed = raw_key[:32]
+        elif len(raw_key) == 32:
+            seed = raw_key
+        else:
+            seed = raw_key[-32:]
+        sk = nacl.signing.SigningKey(seed)
+        signature = sk.sign(signing_string.encode()).signature
+        sig_b64 = base64.b64encode(signature).decode()
+
+        auth_header = (
+            f'Signature keyId="{settings.subscriber_id}|{settings.unique_key_id}|ed25519",'
+            f'algorithm="ed25519",'
+            f'created="{created}",'
+            f'expires="{expires}",'
+            f'headers="(created) (expires) digest",'
+            f'signature="{sig_b64}"'
+        )
+        results["auth_header"] = auth_header
+
+        # Self-verify the signature we just produced
+        try:
+            vk = nacl.signing.VerifyKey(base64.b64decode(settings.signing_public_key))
+            vk.verify(signing_string.encode(), signature)
+            results["self_verify"] = "PASS"
+        except Exception as ve:
+            results["self_verify"] = f"FAIL: {ve}"
+
+        # Send to gateway
+        gateway_url = "https://pre-prod.gcr.ondc.org/on_search"
+        results["gateway_url"] = gateway_url
+        try:
+            resp = http_requests.post(
+                gateway_url,
+                data=body_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": auth_header,
+                },
+                timeout=15,
+            )
+            results["gateway_status"] = resp.status_code
+            results["gateway_response"] = resp.text[:500]
+            results["gateway_response_headers"] = dict(resp.headers)
+        except Exception as re:
+            results["gateway_request_error"] = str(re)
+
+        return results
+    except Exception as e:
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
 @frappe.whitelist(allow_guest=True)

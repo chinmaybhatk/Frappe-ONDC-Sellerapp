@@ -161,7 +161,7 @@ class ONDCClient:
             )
 
             frappe.log_error(
-                f"Callback {endpoint}: HTTP {response.status_code} - {response.text[:50]}"[:140],
+                f"Callback {endpoint}: HTTP {response.status_code} - {response.text[:200]}"[:500],
                 "ONDC Callback Response"
             )
 
