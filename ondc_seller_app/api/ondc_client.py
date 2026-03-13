@@ -52,306 +52,630 @@ class ONDCClient:
             # Full Ed25519 key (seed + public key) — take only the 32-byte seed
             raw_key = raw_key[:32]
 
-        # Use nacl to sign
         signing_key = nacl.signing.SigningKey(raw_key)
-        public_key_bytes = bytes(signing_key.verify_key)
-        signature_bytes = signing_key.sign(signing_string.encode()).signature
+        message = signing_string.encode()
+        signed = signing_key.sign(message)
+        signature_bytes = signed.signature
+        signature_base64 = base64.b64encode(signature_bytes).decode()
 
-        signature = base64.b64encode(signature_bytes).decode()
-        public_key = base64.b64encode(public_key_bytes).decode()
+        # Get the public key
+        verify_key = signing_key.verify_key
+        public_key_base64 = base64.b64encode(verify_key.encode()).decode()
 
         auth_header = (
-            f'Signature keyId="{self.settings.subscriber_id}|{self.settings.subscriber_uri}|ed25519",'
+            f'Signature keyId="{self.settings.subscriber_id}|{self.settings.public_key_id}|ed25519",'
             f'algorithm="ed25519",'
             f'created="{created}",'
             f'expires="{expires}",'
             f'headers="(created) (expires) digest",'
-            f'signature="{signature}"'
+            f'signature="{signature_base64}"'
         )
+
         return auth_header
 
-    def _calculate_digest(self, body):
+    def _calculate_digest(self, request_body):
         """Calculate BLAKE-512 digest of request body"""
-        if isinstance(body, str):
-            body_bytes = body.encode()
+        if isinstance(request_body, dict):
+            body_str = json.dumps(request_body, separators=(',', ':'), sort_keys=True)
         else:
-            body_bytes = body
-        digest = hashlib.blake2b(body_bytes).digest()
-        return base64.b64encode(digest).decode()
+            body_str = request_body if isinstance(request_body, str) else str(request_body)
+        return base64.b64encode(hashlib.blake2b(body_str.encode()).digest()).decode()
 
     # -----------------------------------------------------------------------
-    # API Calls
+    # Registry Subscription
     # -----------------------------------------------------------------------
-    def call_registry_api(self, url_path, method="GET", data=None):
-        """
-        Make an API call to the ONDC Registry API.
-        """
-        env = self.settings.environment or "staging"
-        base_url = self.base_urls[env]["registry"]
-        url = f"{base_url}{url_path}"
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self.get_auth_header(data or ""),
-            "Expect": "100-continue",  # Add Expect header to prevent 417 errors
-        }
-
+    def get_registry_list(self):
+        """Get list of active subscribers from registry"""
         try:
-            if method == "GET":
-                response = requests.get(url, headers=headers, timeout=30)
-            elif method == "POST":
-                response = requests.post(url, json=data, headers=headers, timeout=30)
-            elif method == "PUT":
-                response = requests.put(url, json=data, headers=headers, timeout=30)
-            else:
-                frappe.throw(f"Unsupported HTTP method: {method}")
+            environment = self.settings.environment
+            registry_url = f"{self.base_urls[environment]['registry']}/subscribers"
+            headers = self._get_common_headers()
 
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.text else None,
-            }
-        except requests.exceptions.RequestException as e:
-            frappe.log_error(f"Registry API Error: {str(e)}", "ONDC Client")
-            frappe.throw(f"Failed to call registry API: {str(e)}")
-
-    def call_gateway_api(self, url_path, data=None):
-        """
-        Make an API call to the ONDC Gateway API.
-        """
-        env = self.settings.environment or "staging"
-        base_url = self.base_urls[env]["gateway"]
-        url = f"{base_url}{url_path}"
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self.get_auth_header(json.dumps(data) if data else ""),
-            "Expect": "100-continue",  # Add Expect header to prevent 417 errors
-        }
-
-        try:
-            response = requests.post(url, json=data, headers=headers, timeout=30)
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.text else None,
-            }
-        except requests.exceptions.RequestException as e:
-            frappe.log_error(f"Gateway API Error: {str(e)}", "ONDC Client")
-            frappe.throw(f"Failed to call gateway API: {str(e)}")
-
-    # -----------------------------------------------------------------------
-    # Webhook Validation
-    # -----------------------------------------------------------------------
-    def validate_webhook_signature(self, request_body, auth_header):
-        """
-        Validate the signature of incoming ONDC webhook requests
-        """
-        if not auth_header:
-            frappe.throw("Missing Authorization header")
-
-        # Extract signature components
-        try:
-            auth_parts = {}
-            for part in auth_header.split(","):
-                key, value = part.strip().split("=", 1)
-                auth_parts[key] = value.strip('"')
-        except ValueError:
-            frappe.throw("Invalid Authorization header format")
-
-        # Validate signature components
-        required_parts = ["keyId", "algorithm", "created", "expires", "signature", "headers"]
-        for part in required_parts:
-            if part not in auth_parts:
-                frappe.throw(f"Missing {part} in Authorization header")
-
-        # Check expiry
-        expires = int(auth_parts["expires"])
-        if datetime.utcnow().timestamp() > expires:
-            frappe.throw("Request signature has expired")
-
-        # Extract public key from keyId
-        # keyId format: "subscriber_id|subscriber_uri|public_key_format"
-        key_id_parts = auth_parts["keyId"].split("|")
-        if len(key_id_parts) < 3:
-            frappe.throw("Invalid keyId format")
-
-        subscriber_id = key_id_parts[0]
-        public_key_base64 = self._get_public_key_from_registry(subscriber_id)
-        if not public_key_base64:
-            frappe.throw(f"Public key not found for subscriber {subscriber_id}")
-
-        # Decode public key
-        try:
-            public_key_bytes = base64.b64decode(public_key_base64)
-            verify_key = nacl.signing.VerifyKey(public_key_bytes)
+            response = requests.get(registry_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
-            frappe.throw(f"Failed to decode public key: {str(e)}")
+            frappe.log_error(f"Error fetching registry list: {str(e)}", "ONDC Registry")
+            raise
 
-        # Reconstruct the signing string
-        headers = auth_parts["headers"].split()
-        signing_string_parts = []
-        for header in headers:
-            header_value = None
-            if header == "(created)":
-                header_value = auth_parts["created"]
-            elif header == "(expires)":
-                header_value = auth_parts["expires"]
-            elif header == "digest":
-                header_value = f"BLAKE-512={self._calculate_digest(request_body)}"
-            else:
-                frappe.throw(f"Unknown header in signing string: {header}")
-            signing_string_parts.append(f"{header}: {header_value}")
-
-        signing_string = "\n".join(signing_string_parts)
-
-        # Verify signature
+    def register_subscriber(self):
+        """Register subscriber on ONDC registry"""
         try:
-            signature = base64.b64decode(auth_parts["signature"])
-            verify_key.verify(signing_string.encode(), signature)
-            return True
-        except Exception as e:
-            frappe.log_error(f"Signature verification failed: {str(e)}", "ONDC Client")
-            return False
+            body = {
+                "subscriber_id": self.settings.subscriber_id,
+                "subscriber_url": self.settings.subscriber_url,
+                "type": "BPP",
+                "signing_public_key": self.settings.public_signing_key,
+                "encryption_public_key": self.settings.public_encryption_key,
+                "country": "IND",
+                "domain": "ONDC:FIS12",
+                "city": "*",
+            }
 
-    def _get_public_key_from_registry(self, subscriber_id):
-        """
-        Fetch the public key of a subscriber from the ONDC Registry
-        """
-        try:
-            response = self.call_registry_api(f"/subscribers/{subscriber_id}")
-            if response["status_code"] == 200:
-                # Extract public key from response
-                data = response["data"]
-                if isinstance(data, list) and len(data) > 0:
-                    return data[0].get("signing_public_key")
-                elif isinstance(data, dict):
-                    return data.get("signing_public_key")
-            return None
+            environment = self.settings.environment
+            registry_url = f"{self.base_urls[environment]['registry']}/subscribe"
+            headers = self._get_common_headers()
+
+            # Add the expected header to prevent 417 errors
+            headers["Expect"] = "100-continue"
+            headers.update({"Content-Type": "application/json"})
+
+            response = requests.post(
+                registry_url, json=body, headers=headers, timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             frappe.log_error(
-                f"Failed to fetch public key for {subscriber_id}: {str(e)}",
-                "ONDC Client",
+                f"Error registering subscriber: {str(e)}", "ONDC Subscriber Registration"
             )
-            return None
+            raise
+
+    def lookup(self, search_request):
+        """Send lookup request to ONDC gateway"""
+        try:
+            environment = self.settings.environment
+            gateway_url = f"{self.base_urls[environment]['gateway']}/lookup"
+
+            headers = self._get_common_headers()
+            headers["Expect"] = "100-continue"
+            headers["Authorization"] = self.get_auth_header(json.dumps(search_request))
+
+            response = requests.post(
+                gateway_url, json=search_request, headers=headers, timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            frappe.log_error(f"Lookup error: {str(e)}", "ONDC Lookup")
+            raise
+
+    def send(self, message_id, transaction_id, endpoint, action, request_body):
+        """Send a request to ONDC gateway"""
+        try:
+            environment = self.settings.environment
+            gateway_url = f"{self.base_urls[environment]['gateway']}/{action}"
+
+            headers = self._get_common_headers()
+            headers["Expect"] = "100-continue"
+            headers["Message-Id"] = message_id
+            headers["Authorization"] = self.get_auth_header(json.dumps(request_body))
+            if transaction_id:
+                headers["X-Gateway-Authorization"] = self._get_gateway_auth_header(
+                    message_id, transaction_id, json.dumps(request_body)
+                )
+
+            response = requests.post(
+                gateway_url, json=request_body, headers=headers, timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            frappe.log_error(f"Send error on {action}: {str(e)}", "ONDC Send")
+            raise
+
+    def _get_common_headers(self):
+        """Get headers common to all requests"""
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def _get_gateway_auth_header(
+        self, message_id, transaction_id, request_body
+    ):
+        """Generate authorization header for gateway requests"""
+        created = int(datetime.utcnow().timestamp())
+        expires = int((datetime.utcnow() + timedelta(minutes=5)).timestamp())
+
+        signing_string = (
+            f"(created): {created}\n"
+            f"(expires): {expires}\n"
+            f"digest: BLAKE-512={self._calculate_digest(request_body)}"
+        )
+
+        signing_private_key = self.settings.get_password("signing_private_key")
+        if not signing_private_key:
+            frappe.throw("Signing private key is not set.")
+
+        raw_key = base64.b64decode(signing_private_key)
+        if len(raw_key) == 64:
+            raw_key = raw_key[:32]
+
+        signing_key = nacl.signing.SigningKey(raw_key)
+        message = signing_string.encode()
+        signed = signing_key.sign(message)
+        signature_bytes = signed.signature
+        signature_base64 = base64.b64encode(signature_bytes).decode()
+
+        verify_key = signing_key.verify_key
+        public_key_base64 = base64.b64encode(verify_key.encode()).decode()
+
+        auth_header = (
+            f'Signature keyId="{message_id}",'
+            f'algorithm="ed25519",'
+            f'created="{created}",'
+            f'expires="{expires}",'
+            f'headers="(created) (expires) digest",'
+            f'signature="{signature_base64}"'
+        )
+
+        return auth_header
 
     # -----------------------------------------------------------------------
-    # Lookup & Discovery
+    # Encryption/Decryption
     # -----------------------------------------------------------------------
-    def search_products(self, search_params, **kwargs):
-        """
-        Search for products on ONDC network.
-        Query format: {"query": {"intent": {...}}}
-        """
-        message = {
-            "context": self._get_context("search", **kwargs),
-            "message": {"intent": search_params},
-        }
-        return self.call_gateway_api("/search", message)
+    def encrypt_request(self, receiver_public_key_base64, request_body):
+        """Encrypt request body using receiver's public key (X25519)"""
+        try:
+            # Decode the base64 receiver public key
+            receiver_public_key_bytes = base64.b64decode(
+                receiver_public_key_base64
+            )
 
-    def select_products(self, cart_items, **kwargs):
-        """
-        Select items from search results.
-        Cart format: {"order": {"items": [...], "provider": {...}}}
-        """
-        message = {
-            "context": self._get_context("select", **kwargs),
-            "message": {"order": cart_items},
-        }
-        return self.call_gateway_api("/select", message)
+            # Create a public key object from the bytes
+            receiver_public_key = nacl.public.PublicKey(
+                receiver_public_key_bytes
+            )
 
-    def get_quotation(self, order_details, **kwargs):
-        """
-        Get quotation for selected items.
-        Order format: {"order": {...}}
-        """
-        message = {
-            "context": self._get_context("init", **kwargs),
-            "message": {"order": order_details},
-        }
-        return self.call_gateway_api("/init", message)
+            # Create a random private key and its corresponding public key
+            private_key = nacl.public.PrivateKey.generate()
+            public_key = private_key.public_key
 
-    def confirm_order(self, order_details, **kwargs):
-        """
-        Confirm an order.
-        Order format: {"order": {...}}
-        """
-        message = {
-            "context": self._get_context("confirm", **kwargs),
-            "message": {"order": order_details},
-        }
-        return self.call_gateway_api("/confirm", message)
+            # Create a box using the random private key and receiver's public key
+            box = nacl.public.Box(private_key, receiver_public_key)
 
-    def track_order(self, order_id, **kwargs):
-        """
-        Track order status.
-        """
-        message = {
-            "context": self._get_context("track", **kwargs),
-            "message": {"order_id": order_id},
-        }
-        return self.call_gateway_api("/track", message)
+            # Serialize request_body to JSON if it's a dict
+            if isinstance(request_body, dict):
+                json_string = json.dumps(request_body)
+            else:
+                json_string = request_body
 
-    def cancel_order(self, order_id, cancellation_reason_id=None, **kwargs):
-        """
-        Cancel an order.
-        """
-        message = {
-            "context": self._get_context("cancel", **kwargs),
-            "message": {
-                "order_id": order_id,
-                "cancellation_reason_id": cancellation_reason_id,
-            },
-        }
-        return self.call_gateway_api("/cancel", message)
+            # Encrypt the JSON string
+            encrypted = box.encrypt(json_string.encode())
 
-    def get_order_status(self, order_id, **kwargs):
-        """
-        Get status of an order.
-        """
-        message = {
-            "context": self._get_context("status", **kwargs),
-            "message": {"order_id": order_id},
-        }
-        return self.call_gateway_api("/status", message)
+            # Return encrypted data and the ephemeral public key
+            return {
+                "encrypted_data": base64.b64encode(encrypted.ciphertext).decode(),
+                "ephemeral_public_key": base64.b64encode(
+                    public_key.encode()
+                ).decode(),
+            }
+        except Exception as e:
+            frappe.log_error(f"Encryption error: {str(e)}", "ONDC Encryption")
+            raise
 
-    def update_order(self, order_details, **kwargs):
-        """
-        Update an order (for seller order updates like pickup confirmation).
-        Order format: {"order": {...}}
-        """
-        message = {
-            "context": self._get_context("update", **kwargs),
-            "message": {"order": order_details},
-        }
-        return self.call_gateway_api("/update", message)
+    def decrypt_response(self, encrypted_data_base64, ephemeral_public_key_base64):
+        """Decrypt response using private key (X25519)"""
+        try:
+            # Get the private key from settings
+            encryption_private_key = self.settings.get_password(
+                "encryption_private_key"
+            )
+            if not encryption_private_key:
+                frappe.throw("Encryption private key is not set.")
+
+            # Decode the base64 private key
+            private_key_bytes = base64.b64decode(encryption_private_key)
+
+            # Create a private key object from the bytes
+            private_key = nacl.public.PrivateKey(private_key_bytes)
+
+            # Decode the ephemeral public key
+            ephemeral_public_key_bytes = base64.b64decode(
+                ephemeral_public_key_base64
+            )
+            ephemeral_public_key = nacl.public.PublicKey(
+                ephemeral_public_key_bytes
+            )
+
+            # Create a box using the private key and ephemeral public key
+            box = nacl.public.Box(private_key, ephemeral_public_key)
+
+            # Decode the encrypted data from base64
+            encrypted_data = base64.b64decode(encrypted_data_base64)
+
+            # Decrypt the data
+            decrypted = box.decrypt(encrypted_data)
+
+            # Parse the decrypted JSON
+            return json.loads(decrypted.decode())
+        except Exception as e:
+            frappe.log_error(f"Decryption error: {str(e)}", "ONDC Decryption")
+            raise
 
     # -----------------------------------------------------------------------
     # Helper Methods
     # -----------------------------------------------------------------------
-    def _get_context(self, action, **kwargs):
-        """
-        Build the context for an ONDC request.
-        """
-        context = {
-            "domain": self.settings.domain or "nic2:category:sub_category",
-            "action": action,
-            "core_version": "1.0.0",
-            "bap_id": self.settings.bap_id,
-            "bap_uri": self.settings.bap_uri,
-            "bpp_id": kwargs.get("bpp_id"),
-            "bpp_uri": kwargs.get("bpp_uri"),
-            "transaction_id": kwargs.get("transaction_id", self._generate_id()),
-            "message_id": kwargs.get("message_id", self._generate_id()),
-            "city": kwargs.get("city", "*"),
-            "country": "IND",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "key": self.settings.subscriber_id,
-        }
-        return {k: v for k, v in context.items() if v is not None}
+    def construct_on_search(self, search_params):
+        """Construct on_search callback body"""
+        try:
+            bpp_details = frappe.get_doc("ONDC BPP Settings", self.settings.name)
+            response_body = {
+                "context": {
+                    "domain": search_params["context"]["domain"],
+                    "country": search_params["context"]["country"],
+                    "city": search_params["context"]["city"],
+                    "action": "on_search",
+                    "core_version": "1.2.0",
+                    "bap_id": search_params["context"]["bap_id"],
+                    "bap_uri": search_params["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": search_params["message_id"],
+                    "transaction_id": search_params["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {
+                    "catalog": self._get_catalog(bpp_details),
+                },
+            }
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_search: {str(e)}",
+                "ONDC On Search",
+            )
+            raise
 
-    @staticmethod
-    def _generate_id():
-        """
-        Generate a unique ID for transactions and messages.
-        """
-        import uuid
-        return str(uuid.uuid4())
+    def construct_on_select(self, select_request):
+        """Construct on_select callback body"""
+        try:
+            selected_items = select_request["message"]["order"]["items"]
+            order_value = 0
+            quote_items = []
+
+            for item in selected_items:
+                # Calculate price
+                item_price = float(item["price"]["value"])
+                item_quantity = int(item["quantity"]["count"])
+                item_total = item_price * item_quantity
+                order_value += item_total
+
+                quote_items.append(
+                    {
+                        "id": item["id"],
+                        "quantity": item["quantity"],
+                        "price": item["price"],
+                    }
+                )
+
+            quote = {
+                "price": {
+                    "currency": "INR",
+                    "value": str(order_value),
+                },
+                "breakup": [
+                    {
+                        "@type": "delivery",
+                        "price": {"currency": "INR", "value": "0"},
+                    },
+                    {
+                        "@type": "discount",
+                        "price": {"currency": "INR", "value": "0"},
+                    },
+                ],
+                "ttl": "PT30M",
+            }
+
+            response_body = {
+                "context": {
+                    "domain": select_request["context"]["domain"],
+                    "country": select_request["context"]["country"],
+                    "city": select_request["context"]["city"],
+                    "action": "on_select",
+                    "core_version": "1.2.0",
+                    "bap_id": select_request["context"]["bap_id"],
+                    "bap_uri": select_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": select_request["message_id"],
+                    "transaction_id": select_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {
+                    "order": {
+                        "items": quote_items,
+                        "quote": quote,
+                        "fulfillment": select_request["message"]["order"][
+                            "fulfillment"
+                        ],
+                    }
+                },
+            }
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_select: {str(e)}",
+                "ONDC On Select",
+            )
+            raise
+
+    def construct_on_init(self, init_request):
+        """Construct on_init callback body"""
+        try:
+            response_body = {
+                "context": {
+                    "domain": init_request["context"]["domain"],
+                    "country": init_request["context"]["country"],
+                    "city": init_request["context"]["city"],
+                    "action": "on_init",
+                    "core_version": "1.2.0",
+                    "bap_id": init_request["context"]["bap_id"],
+                    "bap_uri": init_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": init_request["message_id"],
+                    "transaction_id": init_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {
+                    "order": {
+                        "id": str(datetime.utcnow().timestamp()),
+                        "state": "Created",
+                        "items": init_request["message"]["order"]["items"],
+                        "quote": init_request["message"]["order"]["quote"],
+                        "fulfillment": init_request["message"]["order"][
+                            "fulfillment"
+                        ],
+                        "billing": init_request["message"]["order"].get(
+                            "billing"
+                        ),
+                        "payment": {
+                            "uri": "https://example.com/pay",
+                            "tl_method": "http/get",
+                            "params": {"transaction_id": ""},
+                            "status": "NOT-PAID",
+                        },
+                    }
+                },
+            }
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_init: {str(e)}",
+                "ONDC On Init",
+            )
+            raise
+
+    def construct_on_confirm(self, confirm_request):
+        """Construct on_confirm callback body"""
+        try:
+            order_id = str(datetime.utcnow().timestamp())
+
+            response_body = {
+                "context": {
+                    "domain": confirm_request["context"]["domain"],
+                    "country": confirm_request["context"]["country"],
+                    "city": confirm_request["context"]["city"],
+                    "action": "on_confirm",
+                    "core_version": "1.2.0",
+                    "bap_id": confirm_request["context"]["bap_id"],
+                    "bap_uri": confirm_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": confirm_request["message_id"],
+                    "transaction_id": confirm_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {
+                    "order": {
+                        "id": order_id,
+                        "state": "Confirmed",
+                        "items": confirm_request["message"]["order"]["items"],
+                        "quote": confirm_request["message"]["order"]["quote"],
+                        "fulfillment": {
+                            "id": "fulfillment_001",
+                            "type": confirm_request["message"]["order"][
+                                "fulfillment"
+                            ]["type"],
+                            "state": {"descriptor": {"code": "Pending"}},
+                            "tracking": False,
+                            "contact": confirm_request["message"]["order"][
+                                "fulfillment"
+                            ]["end"]["contact"],
+                        },
+                        "billing": confirm_request["message"]["order"].get(
+                            "billing"
+                        ),
+                        "payment": {
+                            "uri": "https://example.com/pay",
+                            "tl_method": "http/get",
+                            "params": {"transaction_id": order_id},
+                            "status": "PAID",
+                        },
+                    }
+                },
+            }
+
+            # Save the order
+            order_doc = frappe.new_doc("ONDC Order")
+            order_doc.order_id = order_id
+            order_doc.status = "Confirmed"
+            order_doc.request_body = json.dumps(confirm_request)
+            order_doc.response_body = json.dumps(response_body)
+            order_doc.save()
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_confirm: {str(e)}",
+                "ONDC On Confirm",
+            )
+            raise
+
+    def construct_on_status(self, status_request):
+        """Construct on_status callback body"""
+        try:
+            # Fetch the order
+            order_id = status_request["message"].get("order_id")
+            order_doc = frappe.get_doc("ONDC Order", order_id)
+
+            response_body = {
+                "context": {
+                    "domain": status_request["context"]["domain"],
+                    "country": status_request["context"]["country"],
+                    "city": status_request["context"]["city"],
+                    "action": "on_status",
+                    "core_version": "1.2.0",
+                    "bap_id": status_request["context"]["bap_id"],
+                    "bap_uri": status_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": status_request["message_id"],
+                    "transaction_id": status_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {
+                    "order": {
+                        "id": order_id,
+                        "state": order_doc.status,
+                        "fulfillment": {
+                            "id": "fulfillment_001",
+                            "state": {"descriptor": {"code": "Pending"}},
+                        },
+                    }
+                },
+            }
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_status: {str(e)}",
+                "ONDC On Status",
+            )
+            raise
+
+    def construct_on_update(self, update_request):
+        """Construct on_update callback body"""
+        try:
+            order_id = update_request["message"].get("order_id")
+            order_doc = frappe.get_doc("ONDC Order", order_id)
+            order_doc.status = update_request["message"]["order"].get(
+                "state", "Confirmed"
+            )
+            order_doc.save()
+
+            response_body = {
+                "context": {
+                    "domain": update_request["context"]["domain"],
+                    "country": update_request["context"]["country"],
+                    "city": update_request["context"]["city"],
+                    "action": "on_update",
+                    "core_version": "1.2.0",
+                    "bap_id": update_request["context"]["bap_id"],
+                    "bap_uri": update_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": update_request["message_id"],
+                    "transaction_id": update_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {"order": {"id": order_id, "state": order_doc.status}},
+            }
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_update: {str(e)}",
+                "ONDC On Update",
+            )
+            raise
+
+    def construct_on_cancel(self, cancel_request):
+        """Construct on_cancel callback body"""
+        try:
+            order_id = cancel_request["message"].get("order_id")
+            order_doc = frappe.get_doc("ONDC Order", order_id)
+            order_doc.status = "Cancelled"
+            order_doc.save()
+
+            response_body = {
+                "context": {
+                    "domain": cancel_request["context"]["domain"],
+                    "country": cancel_request["context"]["country"],
+                    "city": cancel_request["context"]["city"],
+                    "action": "on_cancel",
+                    "core_version": "1.2.0",
+                    "bap_id": cancel_request["context"]["bap_id"],
+                    "bap_uri": cancel_request["context"]["bap_uri"],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "message_id": cancel_request["message_id"],
+                    "transaction_id": cancel_request["context"]["transaction_id"],
+                    "bpp_id": self.settings.subscriber_id,
+                    "bpp_uri": self.settings.subscriber_url,
+                },
+                "message": {"order": {"id": order_id, "state": "Cancelled"}},
+            }
+
+            return response_body
+        except Exception as e:
+            frappe.log_error(
+                f"Error constructing on_cancel: {str(e)}",
+                "ONDC On Cancel",
+            )
+            raise
+
+    def _get_catalog(self, bpp_details):
+        """Construct catalog from BPP items"""
+        try:
+            items = frappe.get_list("ONDC Item", filters={"bpp": bpp_details.name})
+            providers = {}
+
+            for item in items:
+                item_doc = frappe.get_doc("ONDC Item", item.name)
+                provider_id = item_doc.provider
+
+                if provider_id not in providers:
+                    provider_doc = frappe.get_doc("ONDC Provider", provider_id)
+                    providers[provider_id] = {
+                        "id": provider_id,
+                        "descriptor": {
+                            "name": provider_doc.provider_name,
+                            "short_desc": provider_doc.short_description,
+                            "long_desc": provider_doc.long_description,
+                        },
+                        "items": [],
+                    }
+
+                providers[provider_id]["items"].append(
+                    {
+                        "id": item_doc.name,
+                        "descriptor": {
+                            "name": item_doc.item_name,
+                            "short_desc": item_doc.short_description,
+                            "long_desc": item_doc.long_description,
+                        },
+                        "price": {
+                            "currency": "INR",
+                            "value": str(item_doc.price),
+                        },
+                    }
+                )
+
+            return {"bpp_providers": list(providers.values())}
+        except Exception as e:
+            frappe.log_error(f"Error fetching catalog: {str(e)}", "ONDC Catalog")
+            raise
