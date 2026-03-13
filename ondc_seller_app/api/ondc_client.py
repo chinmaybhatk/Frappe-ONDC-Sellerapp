@@ -57,6 +57,7 @@ class ONDCClient:
             "transaction_id": original_context.get("transaction_id", ""),
             "message_id": str(uuid.uuid4()),  # Always generate a new unique message_id for responses
             "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "ttl": "PT30S",  # ONDC 1.2.0 mandatory: response TTL (30 seconds)
         }
 
     # -----------------------------------------------------------------------
@@ -1168,6 +1169,7 @@ class ONDCClient:
                     },
                     "category_id": product.category_code or "Grocery",
                     "fulfillment_id": product.fulfillment_id or "F1",
+                    "location_id": "L1",  # ONDC 1.2.0 mandatory: link item to provider location
                     "quantity": {
                         "available": {
                             "count": str(product.available_quantity or 0),
@@ -1175,6 +1177,18 @@ class ONDCClient:
                         "maximum": {
                             "count": str(product.maximum_quantity or 10),
                         },
+                    },
+                    "@ondc/org/returnable": "true",
+                    "@ondc/org/cancellable": "true",
+                    "@ondc/org/time_to_ship": "PT45M",  # 45 minutes to ship
+                    "@ondc/org/available_on_cod": "false",
+                    "@ondc/org/contact_details_consumer_care": self.settings.consumer_care_phone or "",
+                    "@ondc/org/statutory_reqs_packaged_commodities": {
+                        "manufacturer_or_packer_name": self.settings.store_name or "",
+                        "manufacturer_or_packer_address": self.settings.store_locality or "",
+                        "common_or_generic_name_of_commodity": product.product_name or "",
+                        "net_quantity_or_measure_of_commodity_in_pkg": "1",
+                        "month_year_of_manufacture_packing_import": "01/2024",
                     },
                 })
 
@@ -1196,7 +1210,18 @@ class ONDCClient:
                         "state": self.settings.store_state or "",
                         "area_code": self.settings.store_area_code or "",
                     },
+                    "time": {
+                        "label": "enable",
+                        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        "days": "1,2,3,4,5,6,7",
+                        "schedule": {
+                            "holidays": [],
+                            "times": ["0000", "2359"],
+                            "frequency": "PT4H",
+                        },
+                    },
                 }],
+                "time_to_ship": "PT45M",  # ONDC 1.2.0 mandatory: provider-level time to ship
                 "fulfillments": [{
                     "id": "F1",
                     "type": "Delivery",
@@ -1208,8 +1233,8 @@ class ONDCClient:
                 "items": items,
             }
 
-            # ONDC on_search catalog MUST include bpp/descriptor and bpp/fulfillments
-            # at the top level (in addition to bpp/providers) per ONDC 1.2.0 spec.
+            # ONDC on_search catalog MUST include bpp/descriptor, bpp/fulfillments,
+            # bpp/categories at the top level (in addition to bpp/providers) per ONDC 1.2.0 spec.
             # Missing these causes DOMAIN-ERROR code 10001 from Pramaan gateway.
             catalog = {
                 "bpp/descriptor": {
@@ -1226,6 +1251,11 @@ class ONDCClient:
                         "email": self.settings.consumer_care_email or "",
                     },
                 }],
+                "bpp/categories": [
+                    # ONDC 1.2.0 mandatory: top-level category list for the BPP
+                    {"id": "Grocery"},
+                    {"id": "F&B"},
+                ],
                 "bpp/providers": [provider],
             }
             return catalog
