@@ -160,7 +160,7 @@ class ONDCClient:
             )
 
             frappe.log_error(
-                f"Callback {endpoint}: HTTP {response.status_code} - {response.text[:200]}",
+                f"Callback {endpoint}: HTTP {response.status_code} - {response.text[:50]}"[:140],
                 "ONDC Callback Response"
             )
 
@@ -172,7 +172,7 @@ class ONDCClient:
             }
         except Exception as e:
             frappe.log_error(
-                f"Error sending callback to {endpoint}: {str(e)}",
+                f"Error sending callback to {endpoint}: {str(e)}"[:140],
                 "ONDC Callback Error",
             )
             return {
@@ -193,7 +193,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_search: {str(e)}",
+                f"Error in on_search: {str(e)}"[:140],
                 "ONDC on_search Error",
             )
             raise
@@ -207,7 +207,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_select: {str(e)}",
+                f"Error in on_select: {str(e)}"[:140],
                 "ONDC on_select Error",
             )
             raise
@@ -221,7 +221,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_init: {str(e)}",
+                f"Error in on_init: {str(e)}"[:140],
                 "ONDC on_init Error",
             )
             raise
@@ -235,7 +235,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_confirm: {str(e)}",
+                f"Error in on_confirm: {str(e)}"[:140],
                 "ONDC on_confirm Error",
             )
             raise
@@ -249,7 +249,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_status: {str(e)}",
+                f"Error in on_status: {str(e)}"[:140],
                 "ONDC on_status Error",
             )
             raise
@@ -263,7 +263,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_update: {str(e)}",
+                f"Error in on_update: {str(e)}"[:140],
                 "ONDC on_update Error",
             )
             raise
@@ -277,7 +277,7 @@ class ONDCClient:
             return result
         except Exception as e:
             frappe.log_error(
-                f"Error in on_cancel: {str(e)}",
+                f"Error in on_cancel: {str(e)}"[:140],
                 "ONDC on_cancel Error",
             )
             raise
