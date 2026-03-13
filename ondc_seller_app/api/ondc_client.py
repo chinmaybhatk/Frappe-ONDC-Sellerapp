@@ -82,6 +82,163 @@ class ONDCClient:
         return base64.b64encode(hashlib.blake2b(body_str.encode()).digest()).decode()
 
     # -----------------------------------------------------------------------
+    # Callback Sending
+    # -----------------------------------------------------------------------
+    def send_callback(self, bap_uri, endpoint, payload):
+        """Send callback response to BAP/buyer app.
+
+        Args:
+            bap_uri: The BAP subscriber URI (e.g. https://pramaan.ondc.org/alpha)
+            endpoint: The callback endpoint (e.g. /on_search, /on_select)
+            payload: The response payload dict to send
+
+        Returns:
+            dict with status and response details
+        """
+        try:
+            callback_url = f"{bap_uri.rstrip('/')}{endpoint}"
+
+            # Build headers with auth and Expect: "" to prevent 417 errors
+            headers = self._get_common_headers()
+            headers["Expect"] = ""  # Prevent 417 Expectation Failed from nginx
+            headers["Authorization"] = self.get_auth_header(payload)
+
+            frappe.log_error(
+                f"Sending callback to {callback_url}",
+                "ONDC Callback Debug"
+            )
+
+            response = requests.post(
+                callback_url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+
+            frappe.log_error(
+                f"Callback response: {response.status_code} - {response.text[:500]}",
+                "ONDC Callback Response"
+            )
+
+            return {
+                "status": "success" if response.status_code in (200, 202) else "error",
+                "status_code": response.status_code,
+                "response": response.text[:1000],
+                "callback_url": callback_url,
+            }
+        except Exception as e:
+            frappe.log_error(
+                f"Error sending callback to {bap_uri}{endpoint}: {str(e)}",
+                "ONDC Callback Error",
+            )
+            return {
+                "status": "error",
+                "error": str(e),
+                "callback_url": f"{bap_uri}{endpoint}",
+            }
+
+    # -----------------------------------------------------------------------
+    # Callback Wrapper Methods (construct + send)
+    # -----------------------------------------------------------------------
+    def on_search(self, data):
+        """Process search request: construct on_search payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_search(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_search", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_search: {str(e)}",
+                "ONDC on_search Error",
+            )
+            raise
+
+    def on_select(self, data):
+        """Process select request: construct on_select payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_select(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_select", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_select: {str(e)}",
+                "ONDC on_select Error",
+            )
+            raise
+
+    def on_init(self, data):
+        """Process init request: construct on_init payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_init(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_init", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_init: {str(e)}",
+                "ONDC on_init Error",
+            )
+            raise
+
+    def on_confirm(self, data):
+        """Process confirm request: construct on_confirm payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_confirm(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_confirm", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_confirm: {str(e)}",
+                "ONDC on_confirm Error",
+            )
+            raise
+
+    def on_status(self, data):
+        """Process status request: construct on_status payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_status(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_status", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_status: {str(e)}",
+                "ONDC on_status Error",
+            )
+            raise
+
+    def on_update(self, data):
+        """Process update request: construct on_update payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_update(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_update", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_update: {str(e)}",
+                "ONDC on_update Error",
+            )
+            raise
+
+    def on_cancel(self, data):
+        """Process cancel request: construct on_cancel payload and send callback to BAP"""
+        try:
+            payload = self.construct_on_cancel(data)
+            bap_uri = data["context"]["bap_uri"]
+            result = self.send_callback(bap_uri, "/on_cancel", payload)
+            return result
+        except Exception as e:
+            frappe.log_error(
+                f"Error in on_cancel: {str(e)}",
+                "ONDC on_cancel Error",
+            )
+            raise
+
+    # -----------------------------------------------------------------------
     # Registry Subscription
     # -----------------------------------------------------------------------
     def get_registry_list(self):
@@ -117,7 +274,7 @@ class ONDCClient:
             headers = self._get_common_headers()
 
             # Add the expected header to prevent 417 errors
-            headers["Expect"] = "100-continue"
+            headers["Expect"] = ""
             headers.update({"Content-Type": "application/json"})
 
             response = requests.post(
@@ -138,7 +295,7 @@ class ONDCClient:
             gateway_url = f"{self.base_urls[environment]['gateway']}/lookup"
 
             headers = self._get_common_headers()
-            headers["Expect"] = "100-continue"
+            headers["Expect"] = ""
             headers["Authorization"] = self.get_auth_header(json.dumps(search_request))
 
             response = requests.post(
@@ -157,7 +314,7 @@ class ONDCClient:
             gateway_url = f"{self.base_urls[environment]['gateway']}/{action}"
 
             headers = self._get_common_headers()
-            headers["Expect"] = "100-continue"
+            headers["Expect"] = ""
             headers["Message-Id"] = message_id
             headers["Authorization"] = self.get_auth_header(json.dumps(request_body))
             if transaction_id:
@@ -305,7 +462,7 @@ class ONDCClient:
             raise
 
     # -----------------------------------------------------------------------
-    # Helper Methods
+    # Construct Callback Payloads
     # -----------------------------------------------------------------------
     def construct_on_search(self, search_params):
         """Construct on_search callback body"""
@@ -321,7 +478,7 @@ class ONDCClient:
                     "bap_id": search_params["context"]["bap_id"],
                     "bap_uri": search_params["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": search_params["message_id"],
+                    "message_id": search_params["context"].get("message_id", search_params.get("message_id", "")),
                     "transaction_id": search_params["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -388,7 +545,7 @@ class ONDCClient:
                     "bap_id": select_request["context"]["bap_id"],
                     "bap_uri": select_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": select_request["message_id"],
+                    "message_id": select_request["context"].get("message_id", select_request.get("message_id", "")),
                     "transaction_id": select_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -425,7 +582,7 @@ class ONDCClient:
                     "bap_id": init_request["context"]["bap_id"],
                     "bap_uri": init_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": init_request["message_id"],
+                    "message_id": init_request["context"].get("message_id", init_request.get("message_id", "")),
                     "transaction_id": init_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -475,7 +632,7 @@ class ONDCClient:
                     "bap_id": confirm_request["context"]["bap_id"],
                     "bap_uri": confirm_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": confirm_request["message_id"],
+                    "message_id": confirm_request["context"].get("message_id", confirm_request.get("message_id", "")),
                     "transaction_id": confirm_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -543,7 +700,7 @@ class ONDCClient:
                     "bap_id": status_request["context"]["bap_id"],
                     "bap_uri": status_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": status_request["message_id"],
+                    "message_id": status_request["context"].get("message_id", status_request.get("message_id", "")),
                     "transaction_id": status_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -588,7 +745,7 @@ class ONDCClient:
                     "bap_id": update_request["context"]["bap_id"],
                     "bap_uri": update_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": update_request["message_id"],
+                    "message_id": update_request["context"].get("message_id", update_request.get("message_id", "")),
                     "transaction_id": update_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
@@ -622,7 +779,7 @@ class ONDCClient:
                     "bap_id": cancel_request["context"]["bap_id"],
                     "bap_uri": cancel_request["context"]["bap_uri"],
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "message_id": cancel_request["message_id"],
+                    "message_id": cancel_request["context"].get("message_id", cancel_request.get("message_id", "")),
                     "transaction_id": cancel_request["context"]["transaction_id"],
                     "bpp_id": self.settings.subscriber_id,
                     "bpp_uri": self.settings.subscriber_url,
